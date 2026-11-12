@@ -1,5 +1,3 @@
-// MIRRORED FILE. Do not edit here: this is a verbatim copy of scripts/lib/plugin-zip.mjs from the private
-// ovld-team/overlord-wp-fleet repository, pushed by the private release workflow. Edit it there.
 // Deterministic ZIP builder for the WordPress plugin. Node builtins only (runs on Hostinger during `npm run build`).
 // Same input tree -> same bytes -> same sha256, so the published hash only changes when the plugin changes.
 import { createHash } from "node:crypto";

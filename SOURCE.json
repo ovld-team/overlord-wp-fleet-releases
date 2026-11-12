@@ -1,1 +1,5 @@
-{"version":null,"expected_sha256":null,"size":null}
+{
+  "version": "2.0.7",
+  "expected_sha256": "9b447d7e25d8f5040d3391fd913a97352aa8089f4a6d660dbb34fd604f9253ac",
+  "size": 881264
+}
