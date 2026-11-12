@@ -723,7 +723,7 @@ final class OVP_Meta {
 			'value'     => $value,
 			'post_type' => 'post' === $type ? self::backend()->post_type( $id ) : '',
 		);
-		if ( 'option' !== $type && ! str_starts_with( $key, '_' ) && ! str_starts_with( $key, '@' ) && null === $ctx['field_key'] ) {
+		if ( ( 'option' !== $type || str_starts_with( $key, 'options_' ) ) && ! str_starts_with( $key, '_' ) && ! str_starts_with( $key, '@' ) && null === $ctx['field_key'] ) {
 			$ref = self::backend()->get_raw( $type, $id, '_' . $key );
 			if ( isset( $ref[0] ) && 1 === preg_match( '/^field_[a-z0-9]{6,40}$/', $ref[0] ) ) {
 				$ctx['ref'] = $ref[0];
@@ -748,7 +748,13 @@ final class OVP_Meta {
 				if ( $a->id() !== $hint ) {
 					continue;
 				}
-				return $a->handles( $type, $key, $ctx ) ? $a : self::err( 'ovp_adapter_mismatch', 'Adapter ' . $hint . ' does not handle this key.' );
+				if ( $a->handles( $type, $key, $ctx ) ) {
+					return $a;
+				}
+				if ( 'acf' === $hint && 'option' === $type ) {
+					return self::err( 'ovp_adapter_mismatch', 'The acf adapter handles ACF options-page fields only for option keys named options_<name> (with a field_key). For any other option use options_set.' );
+				}
+				return self::err( 'ovp_adapter_mismatch', 'Adapter ' . $hint . ' does not handle this key.' );
 			}
 			if ( $a->handles( $type, $key, $ctx ) ) {
 				return $a;
@@ -1098,6 +1104,13 @@ final class OVP_Meta {
 			return array( 'changed' => false, 'type' => $type, 'id' => $id, 'key' => $key, 'new_hash' => $p['current'], 'snapshot_id' => null );
 		}
 		$tier = (string) ( $opts['tier'] ?? 'T0' );
+		if ( 'option' === $type && empty( $opts['confirm'] ) ) {
+			foreach ( $p['entries'] as $e ) {
+				if ( self::removes_self_activation( (string) $e['key'], $e['before'], $e['after'] ) ) {
+					return self::err( 'ovp_self_deactivation', 'This write would remove the Overlord plugin from ' . $e['key'] . ' (deactivating it). It needs human_requested plus the two-call confirm (confirm=true after a consumed confirm_token).', 403 );
+				}
+			}
+		}
 		$snap_entries  = array();
 		$after_rows    = array();
 		foreach ( $p['entries'] as $e ) {
@@ -1163,8 +1176,22 @@ final class OVP_Meta {
 		);
 	}
 
+	/** True when changing active_plugins / active_sitewide_plugins from $before to $after drops this plugin from the list. */
+	public static function removes_self_activation( string $key, mixed $before, mixed $after ): bool {
+		$k = strtolower( $key );
+		if ( 'active_plugins' !== $k && 'active_sitewide_plugins' !== $k ) {
+			return false;
+		}
+		$needle = 'overlord-wp-fleet/overlord-wp-fleet.php';
+		$had    = is_string( $before ) && false !== stripos( $before, $needle );
+		if ( ! $had ) {
+			return false;
+		}
+		return ! is_string( $after ) || false === stripos( $after, $needle );
+	}
+
 	/**
-	 * @param array<string, mixed> $opts tier, expected_hash, adapter, field_key, actor
+	 * @param array<string, mixed> $opts tier, expected_hash, adapter, field_key, actor, confirm
 	 * @return array<string, mixed>|WP_Error
 	 */
 	public static function delete( string $type, int $id, string $key, array $opts = array() ): array|WP_Error {
@@ -1208,6 +1235,16 @@ final class OVP_Meta {
 		if ( ! hash_equals( (string) $s['after_hash'], $now ) ) {
 			if ( empty( $opts['force'] ) || OVP_Upload::tier_rank( $tier ) < 3 ) {
 				return self::err( 'ovp_state_changed', 'Value changed after the snapshotted write. force=true needs T3.', 409, array( 'current_hash' => $now ) );
+			}
+		}
+		if ( 'option' === $type && empty( $opts['confirm'] ) ) {
+			foreach ( (array) $s['entries'] as $e ) {
+				$cur = self::backend()->get_raw( $type, $id, (string) $e['key'] );
+				$cur = isset( $cur[0] ) && is_string( $cur[0] ) ? $cur[0] : null;
+				$res = ! empty( $e['existed'] ) && is_string( $e['raw'] ) ? $e['raw'] : null;
+				if ( self::removes_self_activation( (string) $e['key'], $cur, $res ) ) {
+					return self::err( 'ovp_self_deactivation', 'Restoring this snapshot would remove the Overlord plugin from ' . $e['key'] . '. It needs the two-call confirm.', 403 );
+				}
 			}
 		}
 		self::restore_entries( $type, $id, (array) $s['entries'] );

@@ -272,7 +272,7 @@ class Ovp_Module_Plugins_Themes extends Ovp_Module_Base {
 		if ( null === $plugin || ! file_exists( WP_PLUGIN_DIR . '/' . $plugin ) ) {
 			return $this->error( 'mcp_bridge_not_found', 'Plugin file not found.', 404 );
 		}
-		if ( $this->is_self_plugin( $plugin ) || $this->is_legacy_plugin( $plugin ) ) {
+		if ( $this->is_self_plugin( $plugin ) ) {
 			return $this->success( array( 'activated' => true, 'rolled_back' => false, 'error_msg' => '', 'note' => 'Overlord plugin is managed separately.' ) );
 		}
 		$slug = explode( '/', $plugin )[0];
@@ -393,9 +393,20 @@ class Ovp_Module_Plugins_Themes extends Ovp_Module_Base {
 		if ( $this->is_self_plugin( $plugin ) && ! $this->god() ) {
 			return $this->error( 'mcp_bridge_self_protected', 'Deactivating the Overlord plugin needs effective tier T3.', 403 );
 		}
+		$self = $this->is_self_plugin( $plugin );
+		if ( $self && empty( $request->get_json_params()['confirm'] ) ) {
+			return $this->error( 'mcp_bridge_confirm_required', 'Deactivating the Overlord plugin needs the two-call confirm (confirm=true after a consumed confirm_token) at effective tier T3: the site stops answering Fleet until someone re-activates it in wp-admin.', 403 );
+		}
+		if ( ! $self && ( $this->is_legacy_plugin( $plugin ) || $this->has_text_domain( $plugin, 'wp-mcp-bridge' ) ) && empty( $request->get_json_params()['confirm'] ) ) {
+			return $this->error( 'mcp_bridge_confirm_required', 'Deactivating the legacy wp-mcp-bridge plugin needs the two-call confirm (confirm=true after a consumed confirm_token): the old bridge stops answering until it is re-activated.', 403 );
+		}
 		deactivate_plugins( $plugin );
 
-		return $this->success( array( 'deactivated' => $plugin ) );
+		$out = array( 'deactivated' => $plugin );
+		if ( $self ) {
+			$out['note'] = 'The Overlord plugin is now inactive. Deactivating it never touches site content or users; re-activate it in wp-admin to manage the site with Fleet again.';
+		}
+		return $this->success( $out );
 	}
 
 	public function delete_plugin( WP_REST_Request $request ): WP_REST_Response|WP_Error {
@@ -414,6 +425,9 @@ class Ovp_Module_Plugins_Themes extends Ovp_Module_Base {
 		if ( $this->is_self_plugin( $plugin ) || $this->has_text_domain( $plugin, 'overlord-wp-fleet' ) ) {
 			if ( ! $this->god() ) {
 				return $this->error( 'mcp_bridge_self_protected', 'Deleting the Overlord plugin needs effective tier T3.', 403 );
+			}
+			if ( empty( $request->get_json_params()['confirm'] ) ) {
+				return $this->error( 'mcp_bridge_confirm_required', 'Deleting the Overlord plugin needs the two-call confirm (confirm=true after a consumed confirm_token) at effective tier T3: the site stops answering Fleet until the plugin is installed again.', 403 );
 			}
 			return $this->delete_self_files( $plugin );
 		}
@@ -455,12 +469,24 @@ class Ovp_Module_Plugins_Themes extends Ovp_Module_Base {
 		if ( false === $base || false === $real || is_link( $dir ) || $real === $base || dirname( $real ) !== $base || ! is_dir( $real ) ) {
 			return $this->error( 'mcp_bridge_not_found', 'Plugin folder not found, or not a direct child of the plugins directory.', 404 );
 		}
+		// A backup of the folder first, never null: without it nothing is removed.
+		$backup = OVP_Upload::backup_dir( $real, 'plugins/' . $seg[0] );
+		if ( null === $backup ) {
+			return $this->error( 'ovp_backup_failed', 'The plugin folder is never removed without a backup, and the backup could not be taken (ZipArchive missing or the backup area is not writable).', 409 );
+		}
 		deactivate_plugins( $plugin, true );
 		OVP_Upload::rrmdir( $real );
 		if ( is_dir( $real ) ) {
 			return $this->error( 'mcp_bridge_delete_failed', 'The plugin folder could not be removed completely.', 500 );
 		}
-		return $this->success( array( 'deleted' => $plugin, 'uninstall_php_run' => false ) );
+		return $this->success(
+			array(
+				'deleted'           => $plugin,
+				'uninstall_php_run' => false,
+				'backup'            => $backup,
+				'note'              => 'Removing the plugin never touches site content or users (no uninstall.php, no user or post deletion).',
+			)
+		);
 	}
 
 	// -- Themes ---------------------------------------------------------------
@@ -745,8 +771,8 @@ class Ovp_Module_Plugins_Themes extends Ovp_Module_Base {
 	}
 
 	/**
-	 * The legacy 1.x plugin: never activated or exported from here (it would bring the bearer token
-	 * back). Deactivating it is allowed so the master can finish a migration; deleting it through
+	 * The legacy 1.x plugin: never exported from here (it would bring the bearer token back). Deactivating it needs
+	 * the two-call confirm so the master can finish a migration; it activates through the normal path; deleting it through
 	 * plugins/delete is refused (its uninstall.php deletes the service user and its content), the
 	 * files go through fleet/legacy-retire instead.
 	 */

@@ -21,7 +21,7 @@
  * What is removed, and why each item is safe:
  *  - wp_options rows named ovp_*, _ovp_* (this plugin: keys, tier cap, schema, autopair state).
  *  - The replay table {prefix}ovp_nonces (this plugin's own; only nonce hashes and expiry times).
- *  - The cron events ovp_heartbeat, ovp_heartbeat_retry, ovp_gc (this plugin's own hooks).
+ *  - The cron events ovp_heartbeat, ovp_heartbeat_retry, ovp_heartbeat_post_update, ovp_self_update_tick, ovp_gc (this plugin's own hooks).
  *  - Only while the legacy 1.x plugin (wp-mcp-bridge) is NOT active: wp_options rows named
  *    mcp_bridge_* (credentials and settings of the 1.x scheme this plugin replaced), the fatal-error
  *    drop-ins that carry the marker MCP_BRIDGE_FATAL_DROPIN (files only this plugin family writes;
@@ -69,6 +69,8 @@ $wpdb->query( "DROP TABLE IF EXISTS {$wpdb->prefix}ovp_nonces" ); // phpcs:ignor
 wp_clear_scheduled_hook( 'ovp_heartbeat' );
 wp_clear_scheduled_hook( 'ovp_heartbeat_retry' );
 wp_clear_scheduled_hook( 'ovp_gc' );
+wp_clear_scheduled_hook( 'ovp_heartbeat_post_update' );
+wp_clear_scheduled_hook( 'ovp_self_update_tick' );
 
 if ( ! $ovp_legacy_active ) {
 	$ovp_unlink_ours = static function ( string $path ): void {

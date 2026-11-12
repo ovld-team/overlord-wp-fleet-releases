@@ -702,6 +702,94 @@ final class OVP_Upload {
 	}
 
 	/**
+	 * Zip a directory tree into backups/dirs/<key>/<ts>-<rand>.zip before a recursive delete. Symlinks are not followed
+	 * (stored as nothing), the backup area itself is skipped, and the tree is capped (20000 files, 256 MiB) so a huge
+	 * folder cannot exhaust the disk: past the cap, or without ZipArchive, the result is null and the caller must refuse
+	 * the delete (a directory is never deleted without a backup).
+	 *
+	 * @return string|null backup id "dirs/<key>/<name>.zip", or null when no backup could be taken
+	 */
+	public static function backup_dir( string $path, string $rel ): ?string {
+		if ( ! is_dir( $path ) || is_link( $path ) || ! class_exists( 'ZipArchive' ) ) {
+			return null;
+		}
+		$root = self::sub_dir( 'backups/dirs' );
+		if ( $root instanceof WP_Error ) {
+			return null;
+		}
+		$base = self::base_dir();
+		$real = realpath( $path );
+		if ( false === $real || self::base_inside( $real ) ) {
+			return null;
+		}
+		$key = substr( hash( 'sha256', $rel ), 0, 16 ) . '-' . preg_replace( '/[^A-Za-z0-9._-]/', '_', substr( basename( $rel ), 0, 60 ) );
+		$dir = $root . '/' . $key;
+		if ( ! is_dir( $dir ) && ! @mkdir( $dir, 0700, true ) && ! is_dir( $dir ) ) {
+			return null;
+		}
+		$name = gmdate( 'YmdHis' ) . '-' . bin2hex( random_bytes( 3 ) ) . '.zip';
+		$zip  = new ZipArchive();
+		if ( true !== $zip->open( $dir . '/' . $name, ZipArchive::CREATE | ZipArchive::EXCL ) ) {
+			return null;
+		}
+		$files = 0;
+		$bytes = 0;
+		$ok    = true;
+		try {
+			$it = new RecursiveIteratorIterator( new RecursiveDirectoryIterator( $real, FilesystemIterator::SKIP_DOTS ), RecursiveIteratorIterator::SELF_FIRST );
+			foreach ( $it as $f ) {
+				$fp = $f->getPathname();
+				if ( $f->isLink() || ( is_string( $base ) && ( $fp === $base || str_starts_with( $fp, rtrim( $base, '/\\' ) . '/' ) ) ) ) {
+					continue;
+				}
+				$local = substr( $fp, strlen( $real ) + 1 );
+				if ( $f->isDir() ) {
+					$zip->addEmptyDir( $local );
+					continue;
+				}
+				$files++;
+				$bytes += (int) $f->getSize();
+				if ( $files > 20000 || $bytes > 256 * 1024 * 1024 || ! $zip->addFile( $fp, $local ) ) {
+					$ok = false;
+					break;
+				}
+			}
+		} catch ( Throwable $e ) {
+			$ok = false;
+		}
+		$closed = $zip->close();
+		if ( ! $ok || ! $closed || ! is_file( $dir . '/' . $name ) ) {
+			@unlink( $dir . '/' . $name );
+			return null;
+		}
+		@chmod( $dir . '/' . $name, 0600 );
+		@file_put_contents( $dir . '/' . $name . '.json', (string) json_encode( array( 'rel' => $rel, 'ts' => time(), 'files' => $files, 'bytes' => $bytes ) ) );
+		self::prune( $dir, '.zip', (int) self::$cfg['keep_backups'] );
+		return 'dirs/' . $key . '/' . $name;
+	}
+
+	/**
+	 * True when the stage/backup base dir lies inside (or is) $dir: a backup written there would be deleted together with $dir,
+	 * so no backup of $dir can be kept and the caller must refuse to remove it.
+	 */
+	public static function base_inside( string $dir ): bool {
+		$base = self::base_dir();
+		if ( ! is_string( $base ) ) {
+			return false;
+		}
+		$rb = realpath( $base );
+		$rd = realpath( $dir );
+		if ( false === $rb || false === $rd ) {
+			return false;
+		}
+		if ( in_array( PHP_OS_FAMILY, array( 'Darwin', 'Windows' ), true ) ) {
+			$rb = strtolower( $rb );
+			$rd = strtolower( $rd );
+		}
+		return self::path_inside( $rb, $rd );
+	}
+
+	/**
 	 * Restore a file backup id (as returned by backup_file) over $dest, atomically.
 	 *
 	 * @return array<string, mixed>|WP_Error

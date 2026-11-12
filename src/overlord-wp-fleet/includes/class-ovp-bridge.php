@@ -116,6 +116,7 @@ class Ovp_Bridge {
 		Ovp_Nonce_Store_Wpdb::install();
 		self::purge_legacy();
 		update_option( self::SCHEMA_OPTION, OVP_FLEET_VERSION, true );
+		Ovp_Fleet::schedule_post_update_heartbeat(); // First request on new code after an update.
 	}
 
 	/**
@@ -216,6 +217,7 @@ class Ovp_Bridge {
 		self::recover_pending();
 		Ovp_Fatal::install();
 		Ovp_Fleet::schedule();
+		Ovp_Fleet::schedule_post_update_heartbeat();
 		Ovp_Migration::run( 'activate' );
 	}
 
@@ -225,6 +227,7 @@ class Ovp_Bridge {
 	 */
 	public static function deactivate(): void {
 		Ovp_Fleet::unschedule();
+		Ovp_Updater::unschedule_tick();
 		wp_clear_scheduled_hook( self::GC_HOOK );
 	}
 

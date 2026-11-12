@@ -4,7 +4,7 @@ Tags: rest-api, automation, ai, agent, management
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 8.3
-Stable tag: 2.0.9
+Stable tag: 2.0.10
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -55,6 +55,9 @@ Deleting the plugin removes only what it created: its own `ovp_*` options, its r
 
 == Upgrade Notice ==
 
+= 2.0.10 =
+2.0.10: the plugin can now update itself even when another plugin switches WordPress's background updater off (only this plugin, only signed newer releases, still switched off by Settings > Overlord WP Fleet). T3 callers can run risky core-table SQL and the other tier-gated operations behind the confirm; deleting or deactivating this plugin through Fleet always takes a backup and never touches content.
+
 = 2.0.9 =
 2.0.9: the Fleet site list can show your site's icon (a PNG, JPEG, WebP, GIF or ICO of at most 20 KB, never SVG, read from disk). A site paired before 2.0.7 that has no stored tier cap now says so in Settings > Overlord WP Fleet and reports it to the master. Installing from a GitHub release URL works again.
 
@@ -65,6 +68,16 @@ Deleting the plugin removes only what it created: its own `ovp_*` options, its r
 A site that was paired by 2.0.6 and has remote raising switched on but no stored ceiling is no longer allowed to be raised back to T3 by the master on its own: its ceiling is now its current cap. To allow T3 again, re-pair the site or set the tier in wp-admin (Settings > Overlord WP Fleet).
 
 == Changelog ==
+
+= 2.0.10 =
+* New: own twice-daily update tick (`ovp_self_update_tick`) for this plugin only, independent of `automatic_updater_disabled`; explicit OFF still wins; at most one attempt per 6 hours, paused 24 hours after 3 failures.
+* New: one heartbeat about 10 seconds after this plugin is updated or activated, so the site icon and version reach the Fleet right away.
+* New: `db_exec` on core tables (DDL, UPDATE, DELETE) at effective T3 with human request and the two-call confirm; the plan names the tables and rows.
+* New: `files_write` `patch` for wp-config.php (append_define / replace_define); `set_site_cap` can raise caps again at T3 with human request and confirm.
+* Fixed: tier-gated keys, administrator users and unscheduled cron hooks no longer fail at T3; `db_query` can read sensitive tables at T3.
+* Fixed: `files_delete` of a directory takes a backup; deleting or deactivating this plugin through Fleet needs the confirm and a backup.
+* Fixed: Yoast writes no longer duplicate indexable rows; Yoast meta_delete; ACF options keys; post create is atomic; invalid Elementor JSON is refused; oob missing drop-in message; media search and import folders; directory listing names; several smaller gate and schema issues (see docs/TOOL-BEHAVIOUR.md).
+* Fixed: wp-config `remove_define`; deactivating the legacy wp-mcp-bridge plugin needs the two-call confirm and activating it really activates; `db_query` reports SQL errors; every `.user.ini` needs the confirm; `UPDATE STRAIGHT_JOIN` is classified like any core-table write; deleting an empty folder works.
 
 = 2.0.9 =
 * New: the heartbeat carries the site icon (WordPress site icon, then ABSPATH/favicon.ico, then the active theme's favicon.ico / favicon.png) as `{mime, b64, sha256}`, only when the file really is a PNG, JPEG, WebP, GIF or ICO (magic bytes) and at most 20 KB; a larger raster is downscaled to 64x64 PNG with the WordPress image editor. SVG is never sent. Any error sends nothing.

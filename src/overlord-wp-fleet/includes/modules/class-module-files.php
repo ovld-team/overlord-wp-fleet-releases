@@ -269,8 +269,31 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		return new WP_Filesystem_Direct( array() );
 	}
 
+	/**
+	 * D18: the two scope roots can be LISTED. '', '.', '/', 'abspath' and 'abspath/' name the WordPress root
+	 * (ABSPATH); 'wp-content' names WP_CONTENT_DIR (unless a real wp-content/wp-content folder exists). Only
+	 * directory listings use this: names, no file bytes. Writes and deletes never resolve a scope root.
+	 * Any '..', ':' or NUL still fails in resolve().
+	 */
+	public function root_listing_path( string $raw ): ?string {
+		if ( str_contains( $raw, "\0" ) || str_contains( $raw, ':' ) || str_contains( str_replace( '\\', '/', $raw ), '..' ) ) {
+			return null;
+		}
+		$rel = strtolower( $this->normalize_rel( $raw ) );
+		if ( '' === $rel || 'abspath' === $rel ) {
+			$root = realpath( ABSPATH );
+			return false === $root ? null : $root;
+		}
+		if ( 'wp-content' === $rel && false === realpath( WP_CONTENT_DIR . '/wp-content' ) ) {
+			$root = realpath( WP_CONTENT_DIR );
+			return false === $root ? null : $root;
+		}
+		return null;
+	}
+
 	public function read_path( WP_REST_Request $request ): WP_REST_Response|WP_Error {
-		$path = $this->resolve( $this->str( $request->get_param( 'path' ) ) );
+		$raw_path = $this->str( $request->get_param( 'path' ) );
+		$path     = $this->root_listing_path( $raw_path ) ?? $this->resolve( $raw_path );
 		if ( is_wp_error( $path ) ) {
 			return $path;
 		}
@@ -283,8 +306,9 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		$fs = $this->filesystem();
 
 		if ( $fs->is_dir( $path ) ) {
-			$list    = array_keys( (array) $fs->dirlist( $path ) );
-			sort( $list );
+			// PHP turns a numeric folder name ("2024") into an int array key: force strings (D17).
+			$list    = array_map( 'strval', array_keys( (array) $fs->dirlist( $path ) ) );
+			sort( $list, SORT_STRING );
 			$cursor  = (string) $request->get_param( 'cursor' );
 			$max     = Ovp_Chunk::max_items( $request->get_param( 'max_items' ), 200 );
 			$page    = array();
@@ -412,6 +436,26 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 
 		$encoding = (string) ( $body['encoding'] ?? 'text' );
 		$content  = $this->str( $body['content'] ?? '' );
+		if ( array_key_exists( 'patch', $body ) && null !== $body['patch'] ) {
+			// D14: patch mode edits the UNREDACTED file on the server, so the redacted read never has to be
+			// written back. Backup + php lint then run in atomic_write like any other write.
+			if ( '' !== $content ) {
+				return $this->error( 'mcp_bridge_invalid_payload', 'Send either content or patch, not both.', 400 );
+			}
+			if ( 1 !== preg_match( '/^wp-config[^\/]*\.php$/i', basename( $path ) ) ) {
+				return $this->error( 'ovp_patch_unsupported', 'patch mode only edits wp-config.php; use content for other files.', 400 );
+			}
+			$src = is_file( $path ) ? file_get_contents( $path ) : false;
+			if ( false === $src ) {
+				return $this->error( 'mcp_bridge_not_found', 'wp-config file does not exist.', 404 );
+			}
+			$patched = self::patch_wp_config( $src, is_array( $body['patch'] ) ? $body['patch'] : array() );
+			if ( is_wp_error( $patched ) ) {
+				return $patched;
+			}
+			$content = $patched;
+			$encoding = 'text';
+		}
 		if ( 'base64' === $encoding ) {
 			if ( ( strlen( $content ) * 3 ) / 4 > 8 * 1024 * 1024 ) {
 				return $this->error( 'mcp_bridge_file_too_large', 'Per-request write cap is 8MB. Use files/upload/* for larger files.', 413 );
@@ -448,14 +492,130 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 			$this->rmdir_created( $created ); // A refused lint or failed write leaves no new empty folders behind.
 			return $res;
 		}
-		return $this->success(
-			array(
-				'path'   => $this->public_path( $path ),
-				'bytes'  => $res['bytes'],
-				'sha256' => $res['sha256'],
-				'backup' => $res['backup'],
-			)
+		$out = array(
+			'path'   => $this->public_path( $path ),
+			'bytes'  => $res['bytes'],
+			'sha256' => $res['sha256'],
+			'backup' => $res['backup'],
 		);
+		if ( isset( $body['patch'] ) && is_array( $body['patch'] ) ) {
+			$out['patched'] = array( 'op' => (string) ( $body['patch']['op'] ?? '' ), 'name' => (string) ( $body['patch']['name'] ?? '' ) );
+		}
+		return $this->success( $out );
+	}
+
+	/**
+	 * Pure wp-config patcher (D14). ops: append_define (add a define() that does not exist yet, placed
+	 * before the "stop editing" marker or the wp-settings.php require) and replace_define (change the
+	 * literal value of exactly one existing define()). Value: string|int|float|bool|null.
+	 *
+	 * @param array<string, mixed> $patch op, name, value
+	 */
+	public static function patch_wp_config( string $src, array $patch ): string|WP_Error {
+		$fail = static fn( string $code, string $msg, int $status = 400 ): WP_Error => new WP_Error( $code, $msg, array( 'status' => $status ) );
+		$op   = (string) ( $patch['op'] ?? '' );
+		$name = (string) ( $patch['name'] ?? '' );
+		if ( ! in_array( $op, array( 'append_define', 'replace_define', 'remove_define' ), true ) ) {
+			return $fail( 'ovp_patch_op', 'patch.op must be append_define, replace_define or remove_define.' );
+		}
+		if ( 1 !== preg_match( '/^[A-Za-z_][A-Za-z0-9_]{0,63}$/', $name ) ) {
+			return $fail( 'ovp_patch_name', 'patch.name must be a PHP constant name.' );
+		}
+		if ( 'remove_define' === $op ) {
+			return self::remove_define( $src, $name );
+		}
+		if ( ! array_key_exists( 'value', $patch ) || ! ( is_scalar( $patch['value'] ) || null === $patch['value'] ) ) {
+			return $fail( 'ovp_patch_value', 'patch.value must be a string, number, boolean or null.' );
+		}
+		$v = $patch['value'];
+		if ( is_string( $v ) ) {
+			if ( str_contains( $v, "\0" ) || strlen( $v ) > 4096 ) {
+				return $fail( 'ovp_patch_value', 'patch.value is not acceptable (NUL byte or longer than 4096).' );
+			}
+			$lit = "'" . str_replace( array( '\\', "'" ), array( '\\\\', "\\'" ), $v ) . "'";
+		} elseif ( is_bool( $v ) ) {
+			$lit = $v ? 'true' : 'false';
+		} elseif ( null === $v ) {
+			$lit = 'null';
+		} elseif ( is_float( $v ) && ! is_finite( $v ) ) {
+			return $fail( 'ovp_patch_value', 'patch.value must be finite.' );
+		} else {
+			$lit = (string) $v;
+		}
+		$q    = preg_quote( $name, '/' );
+		$find = '/define\s*\(\s*([\'"])' . $q . '\1\s*,\s*(\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\]|\\\\.)*"|[^,)]*?)(\s*(?:,[^)]*)?\))/';
+		// Match against a copy where every PHP comment is blanked out (same length, newlines kept), so a commented-out define()
+		// is neither replaced nor counted; the offsets still point into the real source.
+		$n = preg_match_all( $find, self::mask_php_comments( $src ), $m, PREG_OFFSET_CAPTURE );
+		if ( 'append_define' === $op ) {
+			if ( $n > 0 ) {
+				return $fail( 'ovp_patch_exists', $name . ' is already defined in wp-config; use replace_define.', 409 );
+			}
+			$line   = "define( '" . $name . "', " . $lit . " );\n";
+			$marker = '/^[ \t]*\/\*\s*That\'s all, stop editing.*$/mi';
+			if ( 1 === preg_match( $marker, $src, $mm, PREG_OFFSET_CAPTURE ) ) {
+				$at = (int) $mm[0][1];
+			} elseif ( 1 === preg_match( '/^[ \t]*require(?:_once)?\s*\(?\s*ABSPATH\s*\.\s*[\'"]wp-settings\.php[\'"]/mi', $src, $mm, PREG_OFFSET_CAPTURE ) ) {
+				$at = (int) $mm[0][1];
+			} else {
+				return $fail( 'ovp_patch_anchor', 'Could not find the stop-editing marker or the wp-settings.php require to insert before.', 422 );
+			}
+			return substr( $src, 0, $at ) . $line . "\n" . substr( $src, $at );
+		}
+		if ( 0 === $n ) {
+			return $fail( 'mcp_bridge_not_found', $name . ' is not defined in wp-config; use append_define.', 404 );
+		}
+		if ( $n > 1 ) {
+			return $fail( 'ovp_patch_ambiguous', $name . ' is defined ' . $n . ' times (conditional blocks?); edit the file by hand.', 409 );
+		}
+		// Only a plain literal / constant value is replaced in place; an expression (getenv( 'X' ) ?: false) cannot be spliced safely.
+		if ( 1 !== preg_match( '/^(?:\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\]|\\\\.)*"|-?[0-9][0-9.]*|true|false|null|[A-Z_][A-Z0-9_]*)$/i', trim( (string) $m[2][0][0] ) ) ) {
+			return $fail( 'ovp_patch_complex', $name . ' is defined with an expression; edit the file by hand.', 409 );
+		}
+		$off = (int) $m[2][0][1];
+		$len = strlen( (string) $m[2][0][0] );
+		return substr( $src, 0, $off ) . $lit . substr( $src, $off + $len );
+	}
+
+	/** remove_define: delete the one live define( 'NAME', ... ); statement (comments ignored); 404 if absent. */
+	private static function remove_define( string $src, string $name ): string|WP_Error {
+		$fail = static fn( string $code, string $msg, int $status ): WP_Error => new WP_Error( $code, $msg, array( 'status' => $status ) );
+		$q    = preg_quote( $name, '/' );
+		$find = '/define\s*\(\s*([\'"])' . $q . '\1\s*,\s*(?:\'(?:[^\'\\\\]|\\\\.)*\'|"(?:[^"\\\\]|\\\\.)*"|[^,)]*?)(?:\s*,[^)]*)?\)[ \t]*;/';
+		$n    = preg_match_all( $find, self::mask_php_comments( $src ), $m, PREG_OFFSET_CAPTURE );
+		if ( 0 === $n ) {
+			return $fail( 'mcp_bridge_not_found', $name . ' is not defined in wp-config.', 404 );
+		}
+		if ( $n > 1 ) {
+			return $fail( 'ovp_patch_ambiguous', $name . ' is defined ' . $n . ' times (conditional blocks?); edit the file by hand.', 409 );
+		}
+		$start = (int) $m[0][0][1];
+		$end   = $start + strlen( (string) $m[0][0][0] );
+		// Drop the whole line when the define is alone on it.
+		$ls = strrpos( substr( $src, 0, $start ), "\n" );
+		$ls = false === $ls ? 0 : $ls + 1;
+		$le = strpos( $src, "\n", $end );
+		$le = false === $le ? strlen( $src ) : $le + 1;
+		if ( '' === trim( substr( $src, $ls, $start - $ls ) ) && '' === trim( substr( $src, $end, $le - $end ) ) ) {
+			return substr( $src, 0, $ls ) . substr( $src, $le );
+		}
+		return substr( $src, 0, $start ) . substr( $src, $end );
+	}
+
+	/** $src with every PHP comment token replaced by spaces of the same length (newlines kept). */
+	private static function mask_php_comments( string $src ): string {
+		if ( ! function_exists( 'token_get_all' ) ) {
+			return $src;
+		}
+		$out = '';
+		foreach ( token_get_all( $src ) as $tok ) {
+			if ( is_array( $tok ) ) {
+				$out .= in_array( $tok[0], array( T_COMMENT, T_DOC_COMMENT ), true ) ? (string) preg_replace( '/[^\r\n]/', ' ', $tok[1] ) : $tok[1];
+			} else {
+				$out .= $tok;
+			}
+		}
+		return strlen( $out ) === strlen( $src ) ? $out : $src;
 	}
 
 	public function restore_file( WP_REST_Request $request ): WP_REST_Response|WP_Error {
@@ -665,9 +825,57 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		if ( null !== $blocked ) {
 			return $blocked;
 		}
-		$backup = is_file( $path ) ? OVP_Upload::backup_file( $path, $rel ) : null;
+		// The Overlord plugin's own folder (or a folder that contains it): effective T3 only (resolve() already refused
+		// below T3), and never without the confirm the master sends after a consumed two-call confirm_token.
+		$touches_self = $this->touches_own_plugin( $path );
+		if ( $touches_self && ! $confirm ) {
+			return $this->error( 'mcp_bridge_confirm_required', 'This path is, or contains, the Overlord plugin folder. Removing it needs the two-call confirm (confirm=true after a consumed confirm_token) and effective tier T3.', 403 );
+		}
+		if ( is_dir( $path ) && OVP_Upload::base_inside( $path ) ) {
+			return $this->error( 'ovp_backup_inside_target', 'This folder contains the Overlord stage/backup directory, so a backup taken first would be deleted with it. Nothing was removed. Delete a sub-folder that does not contain it, or move the stage directory outside (OVP_STAGE_DIR).', 409 );
+		}
+		if ( is_dir( $path ) ) {
+			// An empty folder holds nothing to lose: no backup (an empty zip would be pointless and fails to build).
+			$backup = self::dir_is_empty( $path ) ? null : OVP_Upload::backup_dir( $path, $rel );
+			if ( null === $backup && ! self::dir_is_empty( $path ) ) {
+				return $this->error( 'ovp_backup_failed', 'A directory is never deleted without a backup, and the backup could not be taken (more than 20000 files or 256 MiB, ZipArchive missing, or the backup area is not writable). Delete smaller sub-folders, or free space and retry.', 409 );
+			}
+		} else {
+			$backup = is_file( $path ) ? OVP_Upload::backup_file( $path, $rel ) : null;
+			if ( $touches_self && null === $backup ) {
+				return $this->error( 'ovp_backup_failed', 'A file of the Overlord plugin is never deleted without a backup, and the backup could not be taken.', 409 );
+			}
+		}
 		$fs->delete( $path, true );
-		return $this->success( array( 'deleted' => $this->public_path( $path ), 'backup' => $backup ) );
+		$out = array( 'deleted' => $this->public_path( $path ), 'backup' => $backup );
+		if ( $touches_self ) {
+			$out['note'] = 'The Overlord plugin was removed from disk. Removing or replacing the plugin never touches site content (posts, pages, media, uploads) or users. The backup holds the removed files; the site needs the plugin re-installed to be managed by Fleet again.';
+		}
+		return $this->success( $out );
+	}
+
+	private static function dir_is_empty( string $dir ): bool {
+		$h = @opendir( $dir );
+		if ( false === $h ) {
+			return false;
+		}
+		while ( false !== ( $e = readdir( $h ) ) ) {
+			if ( '.' !== $e && '..' !== $e ) {
+				closedir( $h );
+				return false;
+			}
+		}
+		closedir( $h );
+		return true;
+	}
+
+	/** True when $path is inside the Overlord plugin folder, is that folder, or is a folder that contains it. */
+	private function touches_own_plugin( string $path ): bool {
+		$root = defined( 'OVP_FLEET_DIR' ) ? realpath( OVP_FLEET_DIR ) : false;
+		if ( ! is_string( $root ) ) {
+			return false;
+		}
+		return self::deny_inside( $path, $root ) || self::deny_inside( $root, $path );
 	}
 
 	private function normalize_rel( string $relative ): string {
@@ -706,6 +914,18 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 				'Writing wp-admin or wp-includes needs confirm=true. A parse error there is a WSOD. Backup is written first.',
 				403
 			);
+		}
+		// Executable code dropped where uploads are served from, and server-config files below the site root, are
+		// the classic persistence spots: they need the two-call confirm at every tier (the master sends confirm=true
+		// only after a consumed confirm_token).
+		if ( ! $confirm && 1 === preg_match( '#(?:^|/)uploads/.*\.(?:php[0-9]?|phtml|phar|pht|phps)$#', $lower ) ) {
+			return $this->error( 'mcp_bridge_confirm_required', 'Writing a PHP file into uploads needs the two-call confirm (confirm=true after a consumed confirm_token).', 403 );
+		}
+		if ( ! $confirm && '.htaccess' === basename( $lower ) && ( 'content' === $scope || str_contains( $lower, '/' ) ) ) {
+			return $this->error( 'mcp_bridge_confirm_required', 'Writing a .htaccess below the site root needs the two-call confirm (confirm=true after a consumed confirm_token).', 403 );
+		}
+		if ( ! $confirm && '.user.ini' === basename( $lower ) && ( 'content' === $scope || str_contains( $lower, '/' ) ) ) {
+			return $this->error( 'mcp_bridge_confirm_required', 'Writing a .user.ini below the site root needs the two-call confirm (confirm=true after a consumed confirm_token).', 403 );
 		}
 		if ( ! $this->god() && ( 'mu-plugins' === $lower || str_starts_with( $lower, 'mu-plugins/' ) || str_contains( $lower, 'wp-content/mu-plugins/' ) ) ) {
 			return $this->error(

@@ -73,16 +73,17 @@ class Ovp_Module_Fleet extends Ovp_Module_Base {
 	}
 
 	/**
-	 * Remote cap change: lowers freely. A raise is accepted only for a request signed at T3, with the
-	 * raise flag on, up to the ceiling stored at pairing (see Ovp_Tiers::remote_set_cap).
+	 * Remote cap change: lowers freely. A raise needs a request signed at T3 and either the raise flag within the ceiling
+	 * stored at pairing, or `human_override` (the master's statement of a human-requested, confirmed T3 raise): see
+	 * Ovp_Tiers::remote_set_cap.
 	 */
 	public function set_cap( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 		$b = (array) $request->get_json_params();
 		if ( ! isset( $b['cap'] ) || ! is_int( $b['cap'] ) ) {
 			return $this->error( 'ovp_bad_cap', 'cap must be an integer 0..3.', 400 );
 		}
-		if ( ! Ovp_Tiers::remote_set_cap( $b['cap'], Ovp_Auth::signed_tier() ) ) {
-			return $this->error( 'ovp_cap_refused', 'The cap can be lowered freely; it can be raised only up to the tier granted at pairing, and only when raising is on and the request is signed at T3. Otherwise change it in wp-admin.', 403 );
+		if ( ! Ovp_Tiers::remote_set_cap( $b['cap'], Ovp_Auth::signed_tier(), ! empty( $b['human_override'] ) ) ) {
+			return $this->error( 'ovp_cap_refused', 'The cap can be lowered freely. It can be raised by a request signed at T3 up to the tier granted at pairing when raising is on, or to any tier (up to the build maximum) when the master confirms a human-requested, two-call-confirmed T3 raise. Otherwise change it in wp-admin.', 403 );
 		}
 		return $this->success( array( 'tier_cap' => Ovp_Tiers::name( Ovp_Tiers::cap_state()['cap'] ) ) );
 	}

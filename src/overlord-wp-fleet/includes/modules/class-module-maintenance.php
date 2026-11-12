@@ -444,13 +444,31 @@ class Ovp_Module_Maintenance extends Ovp_Module_Base {
 		};
 		if ( $flag( 'litespeed', true ) ) {
 			$urls = $this->strings( $body['urls'] ?? null );
+			// D21: URLs of another host are never purged here; say so instead of accepting them silently.
+			$home_host = strtolower( (string) wp_parse_url( home_url(), PHP_URL_HOST ) );
+			$own       = array();
+			$foreign   = array();
+			foreach ( $urls as $u ) {
+				$h = strtolower( (string) wp_parse_url( $u, PHP_URL_HOST ) );
+				if ( '' === $h || $h === $home_host ) {
+					$own[] = $u;
+				} else {
+					$foreign[] = $u;
+				}
+			}
+			if ( array() !== $foreign ) {
+				$report['skipped_foreign_urls'] = $foreign;
+				$report['warnings'][]           = count( $foreign ) . ' URL(s) skipped: only URLs on this site (' . $home_host . ') or relative paths can be purged.';
+			}
 			if ( ! has_action( 'litespeed_purge_all' ) ) {
 				$report['litespeed'] = 'inactive';
-			} elseif ( array() !== $urls ) {
-				foreach ( $urls as $u ) {
+			} elseif ( array() !== $own ) {
+				foreach ( $own as $u ) {
 					do_action( 'litespeed_purge_url', $u );
 				}
-				$report['litespeed'] = 'purged_urls:' . count( $urls );
+				$report['litespeed'] = 'purged_urls:' . count( $own );
+			} elseif ( array() !== $urls ) {
+				$report['litespeed'] = 'no_valid_urls'; // Only foreign URLs were given: never fall back to purge-all.
 			} else {
 				do_action( 'litespeed_purge_all' );
 				$report['litespeed'] = 'purged_all';
@@ -501,11 +519,15 @@ class Ovp_Module_Maintenance extends Ovp_Module_Base {
 		}
 		$type = 'term' === ( $body['type'] ?? 'post' ) ? 'term' : 'post';
 		if ( array() !== $ids ) {
-			$builder = $classes->get( 'Yoast\\WP\\SEO\\Builders\\Indexable_Builder' );
 			foreach ( $ids as $id ) {
 				try {
-					$builder->build_for_id_and_type( $id, $type );
-					$report['rebuilt'][] = $id;
+					$r = Ovp_Yoast_Indexable::rebuild( $id, $type );
+					if ( $r['ok'] ) {
+						$report['rebuilt'][] = $id;
+						$report['duplicates_removed'] = ( $report['duplicates_removed'] ?? 0 ) + $r['removed'];
+					} else {
+						$report['failed'][] = array( 'id' => $id, 'error' => 'rebuild failed' );
+					}
 				} catch ( \Throwable $e ) {
 					$report['failed'][] = array( 'id' => $id, 'error' => $e->getMessage() );
 				}
@@ -523,6 +545,7 @@ class Ovp_Module_Maintenance extends Ovp_Module_Base {
 				}
 			}
 			$report['full_batches'] = $batches;
+			$report['duplicates_removed'] = ( $report['duplicates_removed'] ?? 0 ) + Ovp_Yoast_Indexable::dedupe_all();
 		}
 		return $this->success( $report );
 	}

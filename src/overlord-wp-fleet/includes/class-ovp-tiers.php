@@ -202,18 +202,31 @@ final class Ovp_Tiers {
 	}
 
 	/**
-	 * Remote `set_cap`: lowering is always accepted. A raise needs the `raise` flag (set at pairing
-	 * when a tier was granted, or by wp-admin), a request signed at T3 by the master, and a target
-	 * within the ceiling stored at pairing. There is no default for $signed_tier: the caller passes
-	 * Ovp_Auth::signed_tier() so a forgotten argument cannot grant a raise.
+	 * Remote `set_cap`: lowering is always accepted. A raise needs a request signed at T3 by the master and one of:
+	 *  - the `raise` flag (set at pairing when a tier was granted, or by wp-admin) and a target within the ceiling stored
+	 *    at pairing; or
+	 *  - `$human_override`: the master states that a T3 token, human_requested and its two-call confirm all passed
+	 *    (T3 is god mode, no limit). It lifts both the `raise` flag and the ceiling, up to the build maximum, and the
+	 *    ceiling follows the new cap. It is honoured only together with a T3 signature.
+	 * There is no default for $signed_tier: the caller passes Ovp_Auth::signed_tier() so a forgotten argument cannot grant a raise.
 	 */
-	public static function remote_set_cap( int $new, int $signed_tier ): bool {
+	public static function remote_set_cap( int $new, int $signed_tier, bool $human_override = false ): bool {
 		$s = self::cap_state();
 		if ( $new < 0 || $new > self::max_cap() ) {
 			return false;
 		}
-		if ( $new > $s['cap'] && ( ! $s['raise'] || $new > $s['ceiling'] || $signed_tier < self::T3 ) ) {
-			return false;
+		if ( $new > $s['cap'] ) {
+			if ( $signed_tier < self::T3 ) {
+				return false;
+			}
+			$within = $s['raise'] && $new <= $s['ceiling'];
+			if ( ! $within && ! $human_override ) {
+				return false;
+			}
+			if ( $human_override ) {
+				$s['ceiling'] = max( $s['ceiling'], $new );
+				$s['raise']   = true;
+			}
 		}
 		if ( $new <= $s['cap'] ) {
 			$s['god_until'] = 0; // Lowering also ends any god window.

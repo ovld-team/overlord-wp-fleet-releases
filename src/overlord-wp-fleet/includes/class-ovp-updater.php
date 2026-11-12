@@ -31,6 +31,13 @@ final class Ovp_Updater {
 	public const NONCE    = 'ovp_auto_update';
 	public const FOLDER   = 'overlord-wp-fleet';
 
+	/** Twice-daily plugin-owned update tick (2.0.10). */
+	public const TICK_HOOK      = 'ovp_self_update_tick';
+	public const OPT_TICK       = 'ovp_self_update_tick';
+	public const TICK_MIN_GAP   = 6 * 3600;
+	public const TICK_MAX_FAILS = 3;
+	public const TICK_PAUSE     = 24 * 3600;
+
 	/** Version approved by upgrader_pre_download in this request; source selection compares to it. */
 	private static ?string $installing_version = null;
 
@@ -52,6 +59,85 @@ final class Ovp_Updater {
 		// an entry that was never in the list, which is the default-on case. Catch the click first.
 		add_action( 'wp_ajax_toggle-auto-updates', array( __CLASS__, 'pre_ajax_toggle' ), 0 );
 		add_action( 'load-plugins.php', array( __CLASS__, 'pre_plugins_screen' ), 0 );
+		add_action( self::TICK_HOOK, array( __CLASS__, 'tick' ) );
+		add_action( 'init', array( __CLASS__, 'maybe_schedule_tick' ), 100 );
+	}
+
+	/* ------------------------------------------------------------------ plugin-owned update tick */
+
+	public static function maybe_schedule_tick(): void {
+		if ( ! wp_next_scheduled( self::TICK_HOOK ) ) {
+			wp_schedule_event( time() + 900, 'twicedaily', self::TICK_HOOK );
+		}
+	}
+
+	public static function unschedule_tick(): void {
+		wp_clear_scheduled_hook( self::TICK_HOOK );
+	}
+
+	/** @return array{last:int,fails:int,until:int} */
+	public static function tick_state(): array {
+		$o = get_option( self::OPT_TICK, array() );
+		$o = is_array( $o ) ? $o : array();
+		return array( 'last' => (int) ( $o['last'] ?? 0 ), 'fails' => (int) ( $o['fails'] ?? 0 ), 'until' => (int) ( $o['until'] ?? 0 ) );
+	}
+
+	/** @param array{last:int,fails:int,until:int} $st */
+	private static function save_tick_state( array $st ): void {
+		update_option( self::OPT_TICK, $st, false ); // Never autoloaded.
+	}
+
+	/**
+	 * Cron entry: update THIS plugin from its own signed release, and nothing else. It calls the
+	 * signed native upgrader path directly, so another plugin forcing automatic_updater_disabled or
+	 * auto_update_plugin cannot stop it. An explicit human OFF wins. Never touches other plugins,
+	 * themes or core, and never runs uninstall.php (it is an in-place update).
+	 *
+	 * Backoff: at most one attempt per TICK_MIN_GAP; after TICK_MAX_FAILS consecutive failures it
+	 * pauses for TICK_PAUSE. Returns a short reason code (used by tests and logs).
+	 */
+	public static function tick( ?int $now = null ): string {
+		$now = $now ?? time();
+		if ( ! self::auto_enabled() ) {
+			return 'off';
+		}
+		if ( ! class_exists( 'Ovp_Self_Update' ) ) {
+			return 'unavailable';
+		}
+		$st = self::tick_state();
+		if ( $st['until'] > $now ) {
+			return 'paused';
+		}
+		if ( $st['last'] > 0 && $now - $st['last'] < self::TICK_MIN_GAP ) {
+			return 'too_soon';
+		}
+		$o = self::current_offer();
+		if ( null === $o ) {
+			return 'no_offer';
+		}
+		$idx  = $o['index'];
+		$want = (string) $idx['version'];
+		$disk = Ovp_Self_Update::disk_version();
+		if ( '' !== $disk && version_compare( $disk, $want, '>=' ) ) {
+			return 'pending_reload'; // Already on disk; the next request runs it.
+		}
+		$st['last'] = $now;
+		self::save_tick_state( $st );
+		$r = Ovp_Self_Update::remote_update( array( 'version' => $want, 'sha256' => (string) $idx['sha256'] ) );
+		if ( $r instanceof WP_Error && 'ovp_update_busy' === $r->get_error_code() ) {
+			return 'busy';
+		}
+		$ok = is_array( $r ) && 'ok' === ( $r['state'] ?? '' );
+		if ( $ok ) {
+			self::save_tick_state( array( 'last' => $now, 'fails' => 0, 'until' => 0 ) );
+			return 'updated';
+		}
+		$st['fails'] = $st['fails'] + 1;
+		if ( $st['fails'] >= self::TICK_MAX_FAILS ) {
+			$st['until'] = $now + self::TICK_PAUSE;
+		}
+		self::save_tick_state( $st );
+		return 'failed';
 	}
 
 	/* ------------------------------------------------------------------ identity */

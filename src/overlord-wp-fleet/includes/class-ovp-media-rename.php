@@ -195,21 +195,31 @@ class Ovp_Media_Rename {
 			return new WP_Error( 'mcp_bridge_invalid_media', 'Attachment ' . $id . ' has no file.', array( 'status' => 400 ) );
 		}
 		$ext = strtolower( (string) pathinfo( $old_base, PATHINFO_EXTENSION ) );
-		$filename = sanitize_file_name( (string) ( $raw['filename'] ?? '' ) );
-		$filename = strtolower( $filename );
-		if ( ! self::valid_filename( $filename, $ext ) ) {
-			return new WP_Error( 'mcp_bridge_invalid_media', 'Bad filename for attachment ' . $id . '.', array( 'status' => 400 ) );
-		}
-		if ( self::has_vendor( $filename ) ) {
-			return new WP_Error( 'mcp_bridge_invalid_media', 'New filename still has a vendor token: ' . $filename, array( 'status' => 400 ) );
+		// D23: filename and title are optional per item. A missing filename keeps the current file name,
+		// a missing title keeps the current title (title-only / alt-only edits).
+		$has_filename = isset( $raw['filename'] ) && '' !== trim( (string) $raw['filename'] );
+		$has_title    = isset( $raw['title'] ) && '' !== trim( (string) $raw['title'] );
+		if ( $has_filename ) {
+			$filename = strtolower( sanitize_file_name( (string) $raw['filename'] ) );
+			if ( ! self::valid_filename( $filename, $ext ) ) {
+				return new WP_Error( 'mcp_bridge_invalid_media', 'Bad filename for attachment ' . $id . '.', array( 'status' => 400 ) );
+			}
+			if ( self::has_vendor( $filename ) ) {
+				return new WP_Error( 'mcp_bridge_invalid_media', 'New filename still has a vendor token: ' . $filename, array( 'status' => 400 ) );
+			}
+		} else {
+			$filename = $old_base;
 		}
 
-		$title = sanitize_text_field( (string) ( $raw['title'] ?? '' ) );
-		if ( '' === $title || self::has_vendor( $title ) ) {
-			return new WP_Error( 'mcp_bridge_invalid_media', 'Title for attachment ' . $id . ' is empty or still names a vendor.', array( 'status' => 400 ) );
+		$title = null;
+		if ( $has_title ) {
+			$title = sanitize_text_field( (string) $raw['title'] );
+			if ( '' === $title || self::has_vendor( $title ) ) {
+				return new WP_Error( 'mcp_bridge_invalid_media', 'Title for attachment ' . $id . ' is empty or still names a vendor.', array( 'status' => 400 ) );
+			}
 		}
 
-		$keep_alt = ! empty( $raw['keep_alt'] );
+		$keep_alt = ! empty( $raw['keep_alt'] ) || ! array_key_exists( 'alt', $raw ); // No alt sent: keep the current one.
 		$alt      = sanitize_text_field( (string) ( $raw['alt'] ?? '' ) );
 		if ( ! $keep_alt && self::has_vendor( $alt ) ) {
 			return new WP_Error( 'mcp_bridge_invalid_media', 'Alt for attachment ' . $id . ' still names a vendor.', array( 'status' => 400 ) );
@@ -336,13 +346,15 @@ class Ovp_Media_Rename {
 		if ( array() !== $meta ) {
 			wp_update_attachment_metadata( $id, $meta );
 		}
-		wp_update_post(
-			array(
-				'ID'         => $id,
-				'post_title' => (string) $plan['title'],
-				'post_name'  => sanitize_title( (string) $plan['title'] ),
-			)
-		);
+		if ( null !== $plan['title'] ) {
+			wp_update_post(
+				array(
+					'ID'         => $id,
+					'post_title' => (string) $plan['title'],
+					'post_name'  => sanitize_title( (string) $plan['title'] ),
+				)
+			);
+		}
 		if ( empty( $plan['keep_alt'] ) ) {
 			update_post_meta( $id, '_wp_attachment_image_alt', (string) $plan['alt'] );
 		}

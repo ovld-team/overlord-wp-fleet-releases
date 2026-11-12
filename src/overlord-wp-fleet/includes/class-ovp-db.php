@@ -132,7 +132,12 @@ final class OVP_Db_Backend_WP implements OVP_Db_Backend {
 
 	public function select( string $sql ): ?array {
 		global $wpdb;
-		$rows = $wpdb->get_results( $sql, ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL -- tokenizer-validated, prepared.
+		$wpdb->last_error = '';
+		$rows             = $wpdb->get_results( $sql, ARRAY_A ); // phpcs:ignore WordPress.DB.PreparedSQL -- tokenizer-validated, prepared.
+		// wpdb answers a failed query with an empty array and only sets last_error: report it as a failure.
+		if ( '' !== (string) $wpdb->last_error ) {
+			return null;
+		}
 		return is_array( $rows ) ? $rows : null;
 	}
 
@@ -269,6 +274,8 @@ final class OVP_Db {
 		'load_extension', 'handler', 'procedure', 'analyse', 'for', 'lock', 'with', 'wait', 'nowait', 'skip',
 	);
 	private const FORBIDDEN_SCHEMAS = array( 'information_schema', 'performance_schema', 'mysql', 'sys' );
+	/** Core WordPress tables (bare names): DDL and destructive SQL on them needs the T3 core flag, see validate_exec(). */
+	private const CORE_TABLES       = array( 'posts', 'postmeta', 'comments', 'commentmeta', 'terms', 'term_taxonomy', 'term_relationships', 'termmeta', 'links', 'users', 'usermeta', 'options' );
 	private const EXEC_FIRST        = array( 'insert', 'replace', 'update', 'delete', 'create', 'alter', 'drop', 'truncate' );
 	private const MASK_COLUMNS      = array( 'user_pass', 'user_activation_key', 'session_tokens' );
 
@@ -483,7 +490,7 @@ final class OVP_Db {
 		$tables = array();
 		$stack  = array( array( 'list' => false, 'nofrom' => false ) );
 		$expect = false;
-		$skip   = array( 'if', 'not', 'exists', 'only', 'temporary', 'ignore', 'low_priority', 'quick', 'delayed', 'high_priority', 'table', 'lateral' );
+		$skip   = array( 'if', 'not', 'exists', 'only', 'temporary', 'ignore', 'low_priority', 'quick', 'delayed', 'high_priority', 'table', 'lateral', 'straight_join' );
 		$prev   = '';
 		$count  = count( $toks );
 		for ( $i = 0; $i < $count; $i++ ) {
@@ -532,7 +539,7 @@ final class OVP_Db {
 				$prev = $k;
 				continue;
 			}
-			if ( in_array( $k, array( 'from', 'join', 'into', 'update', 'truncate', 'table' ), true ) && ! ( 'update' === $k && 'key' === $prev ) ) {
+			if ( in_array( $k, array( 'from', 'join', 'straight_join', 'into', 'update', 'truncate', 'table' ), true ) && ! ( 'update' === $k && 'key' === $prev ) ) {
 				$expect      = true;
 				$top['list'] = in_array( $k, array( 'from', 'update', 'table' ), true );
 			} elseif ( in_array( $k, array( 'where', 'set', 'values', 'value', 'group', 'order', 'having', 'limit', 'on', 'using', 'select', 'union', 'window', 'partition' ), true ) ) {
@@ -599,6 +606,11 @@ final class OVP_Db {
 			}
 		}
 		return null;
+	}
+
+	/** Bare table name without a multisite `<blog id>_` prefix (wp_2_posts -> posts). */
+	private static function strip_site( string $bare ): string {
+		return (string) preg_replace( '/^\d+_/', '', $bare );
 	}
 
 	/** Words/tokens every statement kind must avoid. */
@@ -767,7 +779,10 @@ final class OVP_Db {
 	}
 
 	private static function short_error( string $e ): string {
-		return substr( preg_replace( '/\s+/', ' ', $e ) ?? $e, 0, 300 );
+		$e = preg_replace( '/\s+/', ' ', $e ) ?? $e;
+		// A MySQL access error names 'user'@'host'; never pass an account or host on.
+		$e = preg_replace( "/'[^']*'@'[^']*'/", "'***'@'***'", $e ) ?? $e;
+		return substr( $e, 0, 300 );
 	}
 
 	/**
@@ -836,7 +851,21 @@ final class OVP_Db {
 	 *
 	 * @return array<int, string>|WP_Error list of statements (original text slices)
 	 */
-	public static function validate_exec( string $sql, string $tier ): array|WP_Error {
+	public static function validate_exec( string $sql, string $tier, bool $core_destructive = false ): array|WP_Error {
+		$r = self::plan_exec( $sql, $tier, $core_destructive );
+		return $r instanceof WP_Error ? $r : $r['statements'];
+	}
+
+	/**
+	 * Validate a script and describe it. `$core_destructive` is the master's statement that the human_requested +
+	 * two-call confirm passed for DDL / destructive SQL on core WordPress tables; it is honoured only at tier T3 (a lower
+	 * tier is refused before anything else, so T1/T2 keep their refusal). Without it, DROP/TRUNCATE/ALTER/CREATE on a core
+	 * table is refused: the identity/options tables with their old text, the others with the same code.
+	 *
+	 * @return array{statements:array<int,string>,plan:array<int,array<string,mixed>>,requires_confirm:bool,wipes_options:bool}|WP_Error
+	 */
+	public static function plan_exec( string $sql, string $tier, bool $core_destructive = false, bool $with_counts = false ): array|WP_Error {
+		$core_destructive = $core_destructive && self::rank( $tier ) >= 3;
 		if ( self::rank( $tier ) < 3 ) {
 			return self::err( 'ovp_tier_denied', 'db_exec needs T3.', 403 );
 		}
@@ -854,7 +883,10 @@ final class OVP_Db {
 		}
 		$bad_words = array_diff( self::FORBIDDEN_WORDS, array( 'into', 'for', 'with', 'lock', 'wait', 'nowait', 'skip', 'procedure' ) );
 		$out       = array();
-		foreach ( $stmts as $stmt ) {
+		$plan      = array();
+		$confirm   = false;
+		$wipes     = false;
+		foreach ( $stmts as $idx => $stmt ) {
 			$st    = $stmt['toks'];
 			$first = self::kw( $st[0] );
 			if ( ! in_array( $first, self::EXEC_FIRST, true ) ) {
@@ -890,17 +922,78 @@ final class OVP_Db {
 			if ( array() === $tables ) {
 				return self::err( 'ovp_sql_table', 'Statement references no prefixed table.', 403 );
 			}
-			if ( in_array( $first, array( 'drop', 'truncate', 'alter', 'create' ), true ) ) {
-				$prefix = self::be()->prefix();
-				foreach ( $tables as $t ) {
-					if ( in_array( strtolower( substr( $t, strlen( $prefix ) ) ), self::SENSITIVE_TABLES, true ) ) {
-						return self::err( 'ovp_sql_forbidden', 'DDL on core identity/options tables is not allowed.', 403 );
+			$prefix = self::be()->prefix();
+			$bares  = array_map( static fn( string $t ): string => strtolower( substr( $t, strlen( $prefix ) ) ), $tables );
+			// A prefixed name anywhere in the statement counts (USING, STRAIGHT_JOIN, multi-table DELETE/UPDATE, subqueries),
+			// not only the names tables_in() parsed out of table positions.
+			$pl = strlen( $prefix );
+			foreach ( $st as $t ) {
+				if ( in_array( $t['t'], array( 'word', 'ident' ), true ) && 0 === strncasecmp( trim( $t['s'] ), $prefix, $pl ) ) {
+					$b = strtolower( substr( trim( $t['s'] ), $pl ) );
+					if ( ! in_array( $b, $bares, true ) ) {
+						$bares[] = $b;
 					}
 				}
 			}
+			$norm    = array_values( array_unique( array_map( array( self::class, 'strip_site' ), $bares ) ) );
+			$core_in = array_values( array_filter( $norm, static fn( string $b ): bool => in_array( $b, self::CORE_TABLES, true ) ) );
+			$guard   = array_values( array_filter( $norm, static fn( string $b ): bool => in_array( $b, self::CORE_TABLES, true ) || in_array( $b, self::SENSITIVE_TABLES, true ) ) );
+			$is_ddl  = in_array( $first, array( 'drop', 'truncate', 'alter', 'create' ), true );
+			$odku    = false;
+			if ( 'insert' === $first ) {
+				$kws = array_map( array( self::class, 'kw' ), $st );
+				for ( $q = 0, $qn = count( $kws ) - 3; $q < $qn; $q++ ) {
+					if ( 'on' === $kws[ $q ] && 'duplicate' === $kws[ $q + 1 ] && 'key' === $kws[ $q + 2 ] && 'update' === $kws[ $q + 3 ] ) {
+						$odku = true;
+					}
+				}
+			}
+			$type     = $odku ? 'update' : $first;
+			$dml_dest = in_array( $type, array( 'update', 'delete', 'replace' ), true );
+			if ( ! $core_destructive ) {
+				if ( $is_ddl ) {
+					foreach ( $norm as $b ) {
+						if ( in_array( $b, self::SENSITIVE_TABLES, true ) ) {
+							return self::err( 'ovp_sql_forbidden', 'DDL on core identity/options tables is not allowed.', 403 );
+						}
+						if ( in_array( $b, self::CORE_TABLES, true ) && 'create' !== $first ) {
+							return self::err( 'ovp_sql_forbidden', 'DDL on core WordPress tables is not allowed without the two-call confirm and human request (tier T3 only).', 403 );
+						}
+					}
+				} elseif ( $dml_dest && array() !== $core_in ) {
+					return self::err( 'ovp_sql_forbidden', strtoupper( $type ) . ' on core WordPress tables is not allowed without the two-call confirm and human request (tier T3 only).', 403 );
+				}
+			}
+			$destructive = ( $is_ddl && array() !== $guard ) || ( $dml_dest && array() !== $core_in );
+			$confirm     = $confirm || $destructive;
+			if ( $is_ddl && in_array( $first, array( 'drop', 'truncate' ), true ) && in_array( 'options', $norm, true ) ) {
+				$wipes = true;
+			}
+			$rows = array();
+			if ( $destructive && $with_counts ) {
+				foreach ( $bares as $raw ) {
+					$b = self::strip_site( $raw );
+					if ( ! in_array( $b, $guard, true ) ) {
+						continue;
+					}
+					$cnt = self::be()->select( 'SELECT COUNT(*) AS c FROM `' . str_replace( '`', '', $prefix . $raw ) . '`' );
+					$rows[ $b ] = is_array( $cnt ) && isset( $cnt[0]['c'] ) ? (int) $cnt[0]['c'] : null;
+				}
+			}
+			$plan[] = array(
+				'index'            => (int) $idx,
+				'type'             => strtoupper( $type ),
+				'tables'           => $bares,
+				'core_tables'      => $guard,
+				'destructive_core' => $destructive,
+				'rows_in_table'    => $rows,
+			);
 			$out[] = $stmt['text'];
 		}
-		return $out;
+		if ( $wipes && count( $stmts ) > 1 ) {
+			return self::err( 'ovp_sql_forbidden', 'Dropping or truncating the options table must be the only statement in the call.', 403 );
+		}
+		return array( 'statements' => $out, 'plan' => $plan, 'requires_confirm' => $confirm, 'wipes_options' => $wipes );
 	}
 
 	/**
@@ -909,13 +1002,19 @@ final class OVP_Db {
 	 * @return array<string, mixed>|WP_Error
 	 */
 	public static function exec( string $sql, array $params = array(), array $opts = array() ): array|WP_Error {
-		$tier  = (string) ( $opts['tier'] ?? 'T0' );
-		$stmts = self::validate_exec( $sql, $tier );
-		if ( $stmts instanceof WP_Error ) {
-			return $stmts;
+		$tier = (string) ( $opts['tier'] ?? 'T0' );
+		$full = self::plan_exec( $sql, $tier, ! empty( $opts['core_destructive'] ), ! empty( $opts['dry_run'] ) );
+		if ( $full instanceof WP_Error ) {
+			return $full;
 		}
+		$stmts = $full['statements'];
 		if ( ! empty( $opts['dry_run'] ) ) {
-			return array( 'dry_run' => true, 'statements' => count( $stmts ) );
+			return array(
+				'dry_run'          => true,
+				'statements'       => count( $stmts ),
+				'plan'             => $full['plan'],
+				'requires_confirm' => $full['requires_confirm'],
+			);
 		}
 		$dml = true;
 		foreach ( $stmts as $s ) {
@@ -945,7 +1044,9 @@ final class OVP_Db {
 		}
 		// Hard invariant: plugin-owned and auth-key options must not change, however the SQL
 		// was constructed (CONCAT/CHAR tricks defeat any literal scan).
-		if ( self::own_rows_fingerprint() !== $before ) {
+		// Dropping or truncating the options table (a confirmed, human-requested core operation) takes the plugin's own rows with it:
+		// the fingerprint check is meaningless then and is skipped; every other script still has to leave them untouched.
+		if ( ! $full['wipes_options'] && self::own_rows_fingerprint() !== $before ) {
 			if ( $dml ) {
 				$be->rollback();
 			}
@@ -959,7 +1060,7 @@ final class OVP_Db {
 		if ( $dml ) {
 			$be->commit();
 		}
-		return array( 'results' => $results, 'atomic' => $dml );
+		return array( 'results' => $results, 'atomic' => $dml ) + ( $full['wipes_options'] ? array( 'invariant_check' => 'skipped: the options table was dropped or truncated' ) : array() );
 	}
 
 	/** Digest of options rows the SQL tools must never change. */

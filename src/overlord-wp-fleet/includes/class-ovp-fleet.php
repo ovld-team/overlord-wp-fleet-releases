@@ -21,6 +21,7 @@ final class Ovp_Fleet {
 
 	public const HEARTBEAT_HOOK = 'ovp_heartbeat';
 	public const RETRY_HOOK     = 'ovp_heartbeat_retry';
+	public const POST_UPDATE_HOOK = 'ovp_heartbeat_post_update';
 	public const SCHEDULE       = 'ovp_six_hours';
 	public const STATE_OPTION   = 'ovp_heartbeat';
 	public const MAX_ITEMS      = 1000;
@@ -41,6 +42,8 @@ final class Ovp_Fleet {
 		add_filter( 'cron_schedules', array( __CLASS__, 'add_schedule' ) );
 		add_action( self::HEARTBEAT_HOOK, array( __CLASS__, 'cron_heartbeat' ) );
 		add_action( self::RETRY_HOOK, array( __CLASS__, 'cron_heartbeat' ) );
+		add_action( self::POST_UPDATE_HOOK, array( __CLASS__, 'cron_heartbeat' ) );
+		add_action( 'upgrader_process_complete', array( __CLASS__, 'after_upgrade' ), 20, 2 );
 		add_action( 'init', array( __CLASS__, 'maybe_schedule' ), 100 );
 	}
 
@@ -61,6 +64,32 @@ final class Ovp_Fleet {
 	public static function unschedule(): void {
 		wp_clear_scheduled_hook( self::HEARTBEAT_HOOK );
 		wp_clear_scheduled_hook( self::RETRY_HOOK );
+		wp_clear_scheduled_hook( self::POST_UPDATE_HOOK );
+	}
+
+	/**
+	 * One heartbeat shortly after this plugin was updated or activated, so the site icon and new
+	 * version show up without waiting for the 6-hourly event. Never inline: a single cron event
+	 * about 10 s later, once (WordPress dedupes identical events in a 10-minute window).
+	 */
+	public static function schedule_post_update_heartbeat(): void {
+		if ( Ovp_Keys::is_bound() && ! wp_next_scheduled( self::POST_UPDATE_HOOK ) ) {
+			wp_schedule_single_event( time() + 10, self::POST_UPDATE_HOOK );
+		}
+	}
+
+	/**
+	 * upgrader_process_complete: only for an update of this plugin. (On the very update that installs
+	 * this code the old version is still the one running; Ovp_Bridge::maybe_upgrade covers that case.)
+	 *
+	 * @param mixed $upgrader
+	 * @param mixed $hook_extra
+	 */
+	public static function after_upgrade( $upgrader = null, $hook_extra = array() ): void {
+		unset( $upgrader );
+		if ( is_array( $hook_extra ) && class_exists( 'Ovp_Updater' ) && Ovp_Updater::is_ours( $hook_extra ) ) {
+			self::schedule_post_update_heartbeat();
+		}
 	}
 
 	public static function schedule_retry( int $seconds ): void {

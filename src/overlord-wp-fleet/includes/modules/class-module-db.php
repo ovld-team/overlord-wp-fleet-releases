@@ -102,13 +102,13 @@ class Ovp_Module_Db extends Ovp_Module_Base {
 		return is_wp_error( $res ) ? $res : $this->success( $res );
 	}
 
-	/** Body: { sql, params?, dry_run? }. */
+	/** Body: { sql, params?, dry_run?, core_destructive? } (the flag is honoured at effective T3 only; the master sets it after its human request + two-call confirm). */
 	public function exec( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 		$b = (array) $request->get_json_params();
 		if ( '' === trim( $this->str( $b['sql'] ?? '' ) ) ) {
 			return $this->error( 'mcp_bridge_invalid_payload', 'Provide "sql" as a string.', 400 );
 		}
-		$res = OVP_Db::exec( $this->str( $b['sql'] ), is_array( $b['params'] ?? null ) ? $b['params'] : array(), array( 'tier' => $this->tier( $request ), 'dry_run' => ! empty( $b['dry_run'] ) ) );
+		$res = OVP_Db::exec( $this->str( $b['sql'] ), is_array( $b['params'] ?? null ) ? $b['params'] : array(), array( 'tier' => $this->tier( $request ), 'dry_run' => ! empty( $b['dry_run'] ), 'core_destructive' => ! empty( $b['core_destructive'] ) ) );
 		return is_wp_error( $res ) ? $res : $this->success( $res );
 	}
 }

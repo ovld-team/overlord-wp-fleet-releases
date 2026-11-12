@@ -74,6 +74,21 @@ class Ovp_Module_Builder_Apply extends Ovp_Module_Base {
 			return $this->error( 'mcp_bridge_file_too_large', 'elementor_data cap is 4MB. Split the tree; never hex-CONCAT _elementor_data.', 413 );
 		}
 
+		// D13: refuse a structurally invalid tree BEFORE the page is touched.
+		OVP_Meta::adapters();
+		$tree = json_decode( $raw, true, 128 );
+		if ( ! is_array( $tree ) ) {
+			return $this->error( 'ovp_adapter_invalid', 'elementor_data must be a JSON array of elements.', 422 );
+		}
+		$bad = OVP_Adapter_Elementor::validate_tree( $tree );
+		if ( null !== $bad ) {
+			return $this->error( 'ovp_adapter_invalid', 'Invalid Elementor tree, page not changed: ' . $bad, 422 );
+		}
+		$title_err = $this->require_title( $body );
+		if ( null !== $title_err ) {
+			return $title_err;
+		}
+
 		$existing = ! empty( $body['post_id'] );
 		$post_id  = $this->upsert_post( $body, '', false );
 		if ( is_wp_error( $post_id ) ) {
@@ -109,7 +124,11 @@ class Ovp_Module_Builder_Apply extends Ovp_Module_Base {
 		// site-wide purge. A cache failure never fails the write that already succeeded.
 		$cache = $this->clear_post_cache( (int) $post_id );
 
-		return $this->success( $this->applied_result( $post_id ) + array( 'snapshots' => $snapshots, 'cache' => $cache ) );
+		$result = $this->applied_result( $post_id ) + array( 'snapshots' => $snapshots, 'cache' => $cache );
+		if ( ! defined( 'ELEMENTOR_VERSION' ) && ! class_exists( '\\Elementor\\Plugin' ) ) {
+			$result['warnings'] = array( 'Elementor is not active on this site: _elementor_data was saved but nothing will render it until Elementor is installed and active.' );
+		}
+		return $this->success( $result );
 	}
 
 	/**
@@ -203,6 +222,10 @@ class Ovp_Module_Builder_Apply extends Ovp_Module_Base {
 		if ( empty( $body['content'] ) || ! is_string( $body['content'] ) ) {
 			return $this->error( 'mcp_bridge_invalid_payload', 'Provide "content" as the serialized block markup string.', 400 );
 		}
+		$title_err = $this->require_title( $body );
+		if ( null !== $title_err ) {
+			return $title_err;
+		}
 		OVP_Meta::adapters();
 		$check = 'wpbakery' === $adapter ? OVP_Adapter_WPBakery::check_shortcodes( $body['content'] ) : OVP_Adapter_Gutenberg::check_blocks( $body['content'] );
 		if ( null !== $check ) {
@@ -228,7 +251,20 @@ class Ovp_Module_Builder_Apply extends Ovp_Module_Base {
 			OVP_Meta::commit( 'post', $post_id, '_wp_page_template', (string) $body['page_template'], array( 'tier' => OVP_Meta::request_tier( $request ) ) );
 		}
 
-		return $this->success( $this->applied_result( $post_id ) + array( 'snapshot_id' => $snapshot ) );
+		$result = $this->applied_result( $post_id ) + array( 'snapshot_id' => $snapshot );
+		// D21: a silent success is misleading when the builder that renders this markup is absent.
+		if ( 'wpbakery' === $adapter && ! defined( 'WPB_VC_VERSION' ) && ! class_exists( 'Vc_Manager' ) ) {
+			$result['warnings'] = array( 'WPBakery Page Builder is not active on this site: the shortcodes were saved as post_content and will show as literal text until it is installed and active.' );
+		}
+		return $this->success( $result );
+	}
+
+	/** D23: post_title is only required to create a post; an update with post_id may omit it. */
+	private function require_title( array $body ): ?WP_Error {
+		if ( empty( $body['post_id'] ) && '' === trim( (string) ( $body['post_title'] ?? '' ) ) ) {
+			return $this->error( 'mcp_bridge_invalid_payload', 'post_title is required when creating a page (omit it only together with post_id).', 400 );
+		}
+		return null;
 	}
 
 	/**
@@ -422,11 +458,18 @@ class Ovp_Module_Builder_Apply extends Ovp_Module_Base {
 	 * @param array<string, mixed> $body
 	 */
 	private function upsert_post( array $body, string $post_content, bool $with_content ): int|WP_Error {
-		$postarr = array(
-			'post_title'  => wp_strip_all_tags( (string) ( $body['post_title'] ?? '' ) ),
-			'post_status' => sanitize_key( (string) ( $body['post_status'] ?? 'publish' ) ),
-			'post_type'   => sanitize_key( (string) ( $body['post_type'] ?? 'page' ) ),
-		);
+		$update  = ! empty( $body['post_id'] );
+		$postarr = array();
+		// An update only changes what the caller sent (D23): a missing title/status/type never resets the page.
+		if ( ! $update || array_key_exists( 'post_title', $body ) ) {
+			$postarr['post_title'] = wp_strip_all_tags( (string) ( $body['post_title'] ?? '' ) );
+		}
+		if ( ! $update || isset( $body['post_status'] ) ) {
+			$postarr['post_status'] = sanitize_key( (string) ( $body['post_status'] ?? 'publish' ) );
+		}
+		if ( ! $update || isset( $body['post_type'] ) ) {
+			$postarr['post_type'] = sanitize_key( (string) ( $body['post_type'] ?? 'page' ) );
+		}
 		if ( $with_content ) {
 			$postarr['post_content'] = $post_content;
 		}
@@ -435,7 +478,7 @@ class Ovp_Module_Builder_Apply extends Ovp_Module_Base {
 			$postarr['post_name'] = sanitize_title( (string) $body['post_name'] );
 		}
 
-		if ( ! empty( $body['post_id'] ) ) {
+		if ( $update ) {
 			$postarr['ID'] = (int) $body['post_id'];
 			return wp_update_post( $postarr, true );
 		}

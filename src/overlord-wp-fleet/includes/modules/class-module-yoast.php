@@ -549,16 +549,7 @@ class Ovp_Module_Yoast extends Ovp_Module_Base {
 	}
 
 	private function rebuild_indexable( int $object_id, string $object_type ): bool {
-		if ( ! function_exists( 'YoastSEO' ) ) {
-			return false;
-		}
-		try {
-			$builder = YoastSEO()->classes->get( \Yoast\WP\SEO\Builders\Indexable_Builder::class );
-			$builder->build_for_id_and_type( $object_id, $object_type );
-			return true;
-		} catch ( \Throwable $e ) {
-			return false;
-		}
+		return Ovp_Yoast_Indexable::rebuild( $object_id, $object_type )['ok'];
 	}
 
 	private function is_scalar_or_null( mixed $value ): bool {
@@ -658,5 +649,75 @@ class Ovp_Module_Yoast extends Ovp_Module_Base {
 			}
 		}
 		return false;
+	}
+}
+
+/**
+ * Yoast indexable upkeep (D8). One object has ONE row in wp_yoast_indexable. Writes and reindexes
+ * must find that row and update it, and any duplicate rows an earlier run left behind are removed
+ * (newest row wins).
+ */
+final class Ovp_Yoast_Indexable {
+
+	/** Remove duplicate rows for one object. Returns how many rows were deleted. */
+	public static function dedupe( int $object_id, string $object_type ): int {
+		global $wpdb;
+		if ( ! is_object( $wpdb ) || $object_id < 1 || ! in_array( $object_type, array( 'post', 'term', 'user' ), true ) ) {
+			return 0;
+		}
+		$table = $wpdb->prefix . 'yoast_indexable';
+		$ids   = $wpdb->get_col( $wpdb->prepare( "SELECT id FROM {$table} WHERE object_id = %d AND object_type = %s ORDER BY id DESC", $object_id, $object_type ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is prefix + constant.
+		if ( ! is_array( $ids ) || count( $ids ) < 2 ) {
+			return 0;
+		}
+		$drop = array_map( 'intval', array_slice( $ids, 1 ) ); // Keep the newest (highest id).
+		$list = implode( ',', $drop );
+		$wpdb->query( "DELETE FROM {$table}_hierarchy WHERE indexable_id IN ({$list})" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- ints only.
+		$wpdb->query( "DELETE FROM {$table} WHERE id IN ({$list})" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- ints only.
+		return count( $drop );
+	}
+
+	/** Remove duplicates site-wide (one row per object_id + object_type + sub type). Returns rows deleted. */
+	public static function dedupe_all(): int {
+		global $wpdb;
+		if ( ! is_object( $wpdb ) ) {
+			return 0;
+		}
+		$table = $wpdb->prefix . 'yoast_indexable';
+		$n     = $wpdb->query( "DELETE a FROM {$table} a INNER JOIN {$table} b ON a.object_id = b.object_id AND a.object_type = b.object_type AND a.object_sub_type <=> b.object_sub_type AND a.id < b.id WHERE a.object_id IS NOT NULL" ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- table name is prefix + constant.
+		return is_int( $n ) ? $n : 0;
+	}
+
+	/**
+	 * Update the single indexable of an object (passes the existing row to the builder so it updates
+	 * instead of inserting), then drop any duplicates.
+	 *
+	 * @return array{ok:bool,removed:int}
+	 */
+	public static function rebuild( int $object_id, string $object_type ): array {
+		if ( ! function_exists( 'YoastSEO' ) ) {
+			return array( 'ok' => false, 'removed' => 0 );
+		}
+		$removed = self::dedupe( $object_id, $object_type );
+		try {
+			$classes  = YoastSEO()->classes;
+			$existing = false;
+			try {
+				$repo     = $classes->get( \Yoast\WP\SEO\Repositories\Indexable_Repository::class );
+				$existing = $repo->find_by_id_and_type( $object_id, $object_type, false );
+			} catch ( \Throwable $e ) {
+				$existing = false; // No repository: the builder still looks the row up itself.
+			}
+			$builder = $classes->get( \Yoast\WP\SEO\Builders\Indexable_Builder::class );
+			if ( is_object( $existing ) ) {
+				$builder->build_for_id_and_type( $object_id, $object_type, $existing );
+			} else {
+				$builder->build_for_id_and_type( $object_id, $object_type );
+			}
+			$removed += self::dedupe( $object_id, $object_type );
+			return array( 'ok' => true, 'removed' => $removed );
+		} catch ( \Throwable $e ) {
+			return array( 'ok' => false, 'removed' => $removed );
+		}
 	}
 }

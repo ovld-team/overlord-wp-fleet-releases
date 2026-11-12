@@ -82,6 +82,22 @@ class Ovp_Module_Cron extends Ovp_Module_Base {
 			return $this->error( 'mcp_bridge_invalid_payload', 'Provide "hook".', 400 );
 		}
 
+		// Nothing scheduled under this hook (and timestamp / args): answer not_found instead of a made-up success.
+		$found = false;
+		foreach ( ( _get_cron_array() ?: array() ) as $ts => $hooks ) {
+			if ( null !== $timestamp && (int) $ts !== $timestamp ) {
+				continue;
+			}
+			foreach ( (array) ( $hooks[ $hook ] ?? array() ) as $event ) {
+				if ( (array) ( $event['args'] ?? array() ) === $args ) {
+					$found = true;
+				}
+			}
+		}
+		if ( ! $found ) {
+			return $this->error( 'mcp_bridge_not_found', 'No scheduled event for this hook' . ( null !== $timestamp ? ' at that timestamp' : '' ) . '.', 404 );
+		}
+
 		if ( null !== $timestamp ) {
 			wp_unschedule_event( $timestamp, $hook, $args );
 		} else {

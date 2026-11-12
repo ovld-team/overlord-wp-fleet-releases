@@ -72,6 +72,7 @@ class Ovp_Module_Options extends Ovp_Module_Base {
 				'change_hash'   => (string) ( $body['change_hash'] ?? '' ),
 				'dry_run'       => ! empty( $body['dry_run'] ),
 				'as'            => isset( $body['as'] ) ? (string) $body['as'] : null,
+				'confirm'       => ! empty( $body['confirm'] ),
 			)
 		);
 		return is_wp_error( $res ) ? $res : $this->success( $res );
@@ -86,6 +87,7 @@ class Ovp_Module_Options extends Ovp_Module_Base {
 			array(
 				'tier'          => OVP_Meta::request_tier( $request ),
 				'expected_hash' => (string) ( $body['expected_hash'] ?? $request->get_param( 'expected_hash' ) ?? '' ),
+				'confirm'       => ! empty( $body['confirm'] ) || ! empty( $request->get_param( 'confirm' ) ),
 			)
 		);
 		return is_wp_error( $res ) ? $res : $this->success( $res );

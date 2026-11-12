@@ -82,7 +82,63 @@ final class OVP_Adapter_Elementor extends OVP_Adapter {
 				return self::fail( 'ovp_adapter_invalid', 'Each top-level element needs id and elType.' );
 			}
 		}
+		$bad = self::validate_tree( $tree );
+		if ( null !== $bad ) {
+			return self::fail( 'ovp_adapter_invalid', $bad );
+		}
 		return self::writes( array( array( 'key' => '_elementor_data', 'value' => $raw ) ) );
+	}
+
+	/**
+	 * Structural check of a decoded _elementor_data tree (D13). Returns the first problem or null.
+	 * elType must be section|column|container|widget, ids hex-ish, widgets carry a widgetType,
+	 * `elements` is a list, `settings` is an object (or an empty list).
+	 *
+	 * @param array<mixed> $tree
+	 */
+	public static function validate_tree( array $tree, string $path = '$', int $depth = 0 ): ?string {
+		if ( $depth > 40 ) {
+			return $path . ': tree nested deeper than 40 levels.';
+		}
+		if ( ! array_is_list( $tree ) ) {
+			return $path . ': expected a list of elements.';
+		}
+		foreach ( $tree as $i => $el ) {
+			$at = $path . '[' . $i . ']';
+			if ( ! is_array( $el ) ) {
+				return $at . ': element must be an object.';
+			}
+			$type = $el['elType'] ?? null;
+			if ( ! is_string( $type ) || ! in_array( $type, array( 'section', 'column', 'container', 'widget' ), true ) ) {
+				return $at . ': elType must be one of section, column, container, widget.';
+			}
+			$id = $el['id'] ?? null;
+			if ( ! is_string( $id ) && ! is_int( $id ) ) {
+				return $at . ': id is required.';
+			}
+			if ( 1 !== preg_match( '/^[0-9a-fA-F]{1,16}$/', (string) $id ) ) {
+				return $at . ': id "' . substr( (string) $id, 0, 40 ) . '" is not a hex id (Elementor ids are 7-8 hex characters).';
+			}
+			if ( 'widget' === $type && ( ! isset( $el['widgetType'] ) || ! is_string( $el['widgetType'] ) || 1 !== preg_match( '/^[A-Za-z0-9_.-]{1,80}$/', $el['widgetType'] ) ) ) {
+				return $at . ': a widget needs a widgetType string.';
+			}
+			if ( array_key_exists( 'settings', $el ) && ! is_array( $el['settings'] ) ) {
+				return $at . ': settings must be an object.';
+			}
+			if ( array_key_exists( 'elements', $el ) ) {
+				if ( ! is_array( $el['elements'] ) || ! array_is_list( $el['elements'] ) ) {
+					return $at . ': elements must be an array.';
+				}
+				if ( 'widget' === $type && array() !== $el['elements'] ) {
+					return $at . ': a widget cannot have child elements.';
+				}
+				$bad = self::validate_tree( $el['elements'], $at . '.elements', $depth + 1 );
+				if ( null !== $bad ) {
+					return $bad;
+				}
+			}
+		}
+		return null;
 	}
 
 	/** @param array<mixed> $node */
