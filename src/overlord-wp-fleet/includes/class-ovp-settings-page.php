@@ -287,6 +287,13 @@ class Ovp_Settings_Page {
 		$idx  = is_array( $r['index'] ) ? $r['index'] : null;
 		$keys = array_keys( Ovp_Release::RELEASE_KEYS );
 		echo '<div class="ovp-card"><h2>' . esc_html__( 'Updates', 'overlord-wp-fleet' ) . '</h2><table class="ovp-kv">';
+		$st_auto = Ovp_Updater::auto_status();
+		self::row(
+			__( 'Automatic updates', 'overlord-wp-fleet' ),
+			'off' === $st_auto
+				? __( 'OFF (turned off by an admin)', 'overlord-wp-fleet' )
+				: ( 'on' === $st_auto ? __( 'ON (turned on by an admin)', 'overlord-wp-fleet' ) : __( 'ON (default)', 'overlord-wp-fleet' ) )
+		);
 		self::row( __( 'Installed version', 'overlord-wp-fleet' ), OVP_FLEET_VERSION );
 		self::row( __( 'Latest signed release', 'overlord-wp-fleet' ), null !== $idx ? (string) $idx['version'] : __( 'none', 'overlord-wp-fleet' ) );
 		self::row( __( 'Signature verified', 'overlord-wp-fleet' ), $r['verified'] ? __( 'yes', 'overlord-wp-fleet' ) : __( 'no', 'overlord-wp-fleet' ) );
@@ -312,15 +319,21 @@ class Ovp_Settings_Page {
 			echo '<form method="post" style="margin-top:12px">';
 			wp_nonce_field( Ovp_Updater::NONCE );
 			echo '<input type="hidden" name="ovp_action" value="set_auto_update">';
-			echo '<label><input type="checkbox" name="auto_update" value="1"' . checked( Ovp_Updater::auto_enabled(), true, false ) . '> ' . esc_html__( 'Install Overlord WP Fleet updates automatically (signed releases only)', 'overlord-wp-fleet' ) . '</label> ';
-			submit_button( __( 'Save', 'overlord-wp-fleet' ), 'secondary', 'submit', false );
+			$now_on = Ovp_Updater::auto_enabled();
+			echo '<input type="hidden" name="auto_update" value="' . ( $now_on ? '0' : '1' ) . '">';
+			submit_button(
+				$now_on ? __( 'Turn off automatic updates', 'overlord-wp-fleet' ) : __( 'Turn on automatic updates', 'overlord-wp-fleet' ),
+				'secondary',
+				'submit',
+				false
+			);
 			echo '</form>';
 		}
-		echo '<p class="description">' . esc_html__( 'Off by default. Only a person in wp-admin can turn this on; a remote request cannot.', 'overlord-wp-fleet' ) . '</p>';
+		echo '<p class="description">' . esc_html__( 'This plugin, and only this plugin, updates itself automatically by default. Only signed, newer releases are installed; the previous version is kept and restored if the new one fails. Nothing else on this site (WordPress, other plugins, themes, content) is updated automatically by this setting. Only a person in wp-admin can change it; a remote request cannot.', 'overlord-wp-fleet' ) . '</p>';
 
 		$st = Ovp_Self_Update::state();
 		echo '<table class="ovp-kv">';
-		self::row( __( 'Last update state', 'overlord-wp-fleet' ), (string) ( $st['state'] ?? '' ) !== '' ? (string) $st['state'] : __( 'none', 'overlord-wp-fleet' ) );
+		self::row( __( 'Last result', 'overlord-wp-fleet' ), (string) ( $st['state'] ?? '' ) !== '' ? (string) $st['state'] : __( 'none', 'overlord-wp-fleet' ) );
 		if ( '' !== (string) ( $st['reason'] ?? '' ) ) {
 			self::row( __( 'Reason', 'overlord-wp-fleet' ), (string) $st['reason'] );
 		}

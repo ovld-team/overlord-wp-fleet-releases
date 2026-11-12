@@ -10,8 +10,8 @@
  *
  * Who may start a remote update: effective tier T3 (the cap follows the tier the human granted at
  * pairing, so no wp-admin visit is needed), plus the human_requested and confirm-token rules on the
- * master. Only the WordPress auto-update opt-in (ovp_auto_update, unattended updates) stays
- * wp-admin-only, because no human is in the loop there.
+ * master. The WordPress unattended update of this plugin (ovp_auto_update) is ON by default since
+ * 2.0.8; only a human in wp-admin can change it, never a remote call.
  *
  * @package OverlordWpFleet
  * @license GPL-2.0-or-later

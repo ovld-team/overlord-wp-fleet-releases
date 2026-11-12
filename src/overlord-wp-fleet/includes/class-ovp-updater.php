@@ -6,8 +6,10 @@
  * filter for this plugin. The answer is built only from a verified Ovp_Release index. Packages are
  * downloaded and checked here (URL, size, sha256, signature, version) before WordPress unpacks
  * them, and the unpacked folder is checked again. The offer never asks WordPress to install by
- * itself; the opt-in below does that, and only a human in wp-admin can set it. That opt-in is for
- * unattended, WordPress-driven updates (no human in the loop); a human-requested remote rollout is a
+ * itself; the unattended switch below does that. Owner rule (2.0.8): this plugin, and ONLY this
+ * plugin, updates itself automatically by default, through WordPress's own unattended path. Nothing
+ * else becomes automatic. A human in wp-admin can turn it off (explicit choice, stored with
+ * set_by=human) and on again; no remote call can change it. A human-requested remote rollout is a
  * different path and needs effective tier T3, which follows the tier granted at pairing.
  *
  * Identification is by plugin basename. Bulk upgrades do not set hook_extra action or type, so
@@ -46,6 +48,10 @@ final class Ovp_Updater {
 		add_action( 'update_option_auto_update_plugins', array( __CLASS__, 'mirror_plain_update' ), 10, 3 );
 		add_action( 'add_option_auto_update_plugins', array( __CLASS__, 'mirror_site_add' ), 10, 2 );
 		add_filter( 'plugin_auto_update_setting_html', array( __CLASS__, 'filter_setting_html' ), 10, 3 );
+		// Core writes an unchanged auto_update_plugins list (no option hook fires) when a human disables
+		// an entry that was never in the list, which is the default-on case. Catch the click first.
+		add_action( 'wp_ajax_toggle-auto-updates', array( __CLASS__, 'pre_ajax_toggle' ), 0 );
+		add_action( 'load-plugins.php', array( __CLASS__, 'pre_plugins_screen' ), 0 );
 	}
 
 	/* ------------------------------------------------------------------ identity */
@@ -283,11 +289,33 @@ final class Ovp_Updater {
 		Ovp_Self_Update::after_install( $upgrader, $hook_extra );
 	}
 
-	/* ------------------------------------------------------------------ opt-in */
+	/* ------------------------------------------------------------------ automatic update switch */
 
-	public static function auto_enabled(): bool {
+	/**
+	 * The stored human choice, or null when none counts.
+	 *
+	 * Migration rule: only a stored value with set_by === "human" and a boolean "on" is a choice. A
+	 * missing option, or a value written by 2.0.7 (`{on, by, at}`, no set_by), means "never set" and the
+	 * default applies, which is ON.
+	 */
+	public static function human_choice(): ?bool {
 		$o = get_option( self::OPT_AUTO, false );
-		return is_array( $o ) && ! empty( $o['on'] );
+		if ( ! is_array( $o ) || 'human' !== ( $o['set_by'] ?? null ) || ! array_key_exists( 'on', $o ) || ! is_bool( $o['on'] ) ) {
+			return null;
+		}
+		return $o['on'];
+	}
+
+	/** On unless a human explicitly turned it off. */
+	public static function auto_enabled(): bool {
+		$c = self::human_choice();
+		return null === $c ? true : $c;
+	}
+
+	/** @return 'default_on'|'on'|'off' */
+	public static function auto_status(): string {
+		$c = self::human_choice();
+		return null === $c ? 'default_on' : ( $c ? 'on' : 'off' );
 	}
 
 	private static function is_cli(): bool {
@@ -309,24 +337,17 @@ final class Ovp_Updater {
 		if ( ! self::is_cli() && ( ! function_exists( 'wp_verify_nonce' ) || false === wp_verify_nonce( $nonce, self::NONCE ) ) ) {
 			return false;
 		}
+		// Only our own option is written. WordPress's auto_update_plugins list is never written from here:
+		// the filter below does not read it, and the Plugins row shows an "Effective" note when they differ.
 		self::store( $on );
-		$base = self::basename();
-		$list = get_site_option( 'auto_update_plugins', array() );
-		$list = is_array( $list ) ? array_values( $list ) : array();
-		$has  = in_array( $base, $list, true );
-		if ( $on && ! $has ) {
-			$list[] = $base;
-			update_site_option( 'auto_update_plugins', $list );
-		} elseif ( ! $on && $has ) {
-			update_site_option( 'auto_update_plugins', array_values( array_diff( $list, array( $base ) ) ) );
-		}
 		return true;
 	}
 
+	/** Callers have already proven a human (not a remote call) with update_plugins. */
 	private static function store( bool $on ): void {
 		update_option(
 			self::OPT_AUTO,
-			array( 'on' => $on, 'by' => function_exists( 'get_current_user_id' ) ? (int) get_current_user_id() : 0, 'at' => time() ),
+			array( 'on' => $on, 'set_by' => 'human', 'by' => function_exists( 'get_current_user_id' ) ? (int) get_current_user_id() : 0, 'at' => time() ),
 			false
 		);
 	}
@@ -338,6 +359,85 @@ final class Ovp_Updater {
 
 	private static function unslash( string $v ): string {
 		return function_exists( 'wp_unslash' ) ? (string) wp_unslash( $v ) : $v;
+	}
+
+	/** @param array<int,string> $keys */
+	private static function nonce_ok( array $keys, string $action ): bool {
+		if ( ! function_exists( 'wp_verify_nonce' ) ) {
+			return false;
+		}
+		// phpcs:disable WordPress.Security.NonceVerification -- this is the verification.
+		foreach ( $keys as $k ) {
+			if ( isset( $_REQUEST[ $k ] ) && is_string( $_REQUEST[ $k ] ) && false !== wp_verify_nonce( self::unslash( $_REQUEST[ $k ] ), $action ) ) {
+				return true;
+			}
+		}
+		// phpcs:enable
+		return false;
+	}
+
+	/**
+	 * Plugins-screen "Disable/Enable auto-updates" ajax link for OUR row: record the human's explicit
+	 * choice even when core's list does not change (it never held our entry under the default).
+	 * Runs before core's handler (priority 0; core registers at 1); core still verifies and writes its own list as it always does.
+	 */
+	public static function pre_ajax_toggle(): void {
+		if ( ! self::human_with_cap() || ! function_exists( 'wp_doing_ajax' ) || ! wp_doing_ajax()
+			|| ! self::nonce_ok( array( '_ajax_nonce', '_wpnonce', 'nonce' ), 'updates' ) ) {
+			return;
+		}
+		// phpcs:disable WordPress.Security.NonceVerification -- verified just above.
+		$asset = isset( $_POST['asset'] ) && is_string( $_POST['asset'] ) ? trim( urldecode( self::unslash( $_POST['asset'] ) ) ) : '';
+		$state = isset( $_POST['state'] ) && is_string( $_POST['state'] ) ? self::unslash( $_POST['state'] ) : '';
+		// phpcs:enable
+		if ( self::basename() !== $asset || ! in_array( $state, array( 'enable', 'disable' ), true ) ) {
+			return;
+		}
+		$on = 'enable' === $state;
+		if ( self::human_choice() !== $on ) {
+			self::store( $on );
+		}
+	}
+
+	/** Plugins screen: the single-row link and the bulk "Enable/Disable auto-updates" actions, for OUR entry only. */
+	public static function pre_plugins_screen(): void {
+		if ( ! self::human_with_cap() ) {
+			return;
+		}
+		// phpcs:disable WordPress.Security.NonceVerification -- verified below per action.
+		$action = isset( $_REQUEST['action'] ) && is_string( $_REQUEST['action'] ) ? $_REQUEST['action'] : '';
+		if ( '' === $action || '-1' === $action ) {
+			$action = isset( $_REQUEST['action2'] ) && is_string( $_REQUEST['action2'] ) ? $_REQUEST['action2'] : '';
+		}
+		$names = array();
+		if ( in_array( $action, array( 'enable-auto-update', 'disable-auto-update' ), true ) ) {
+			if ( ! self::nonce_ok( array( '_wpnonce' ), 'updates' ) ) {
+				return;
+			}
+			$names = isset( $_GET['plugin'] ) && is_string( $_GET['plugin'] ) ? array( self::unslash( $_GET['plugin'] ) ) : array();
+		} elseif ( in_array( $action, array( 'enable-auto-update-selected', 'disable-auto-update-selected' ), true ) ) {
+			if ( ! self::nonce_ok( array( '_wpnonce' ), 'bulk-plugins' ) ) {
+				return;
+			}
+			$checked = isset( $_POST['checked'] ) && is_array( $_POST['checked'] ) ? $_POST['checked'] : array();
+			foreach ( $checked as $c ) {
+				if ( is_string( $c ) ) {
+					$names[] = self::unslash( $c );
+				}
+			}
+		} else {
+			return;
+		}
+		// phpcs:enable
+		foreach ( $names as $n ) {
+			if ( self::basename() === trim( urldecode( $n ) ) ) {
+				$on = str_starts_with( $action, 'enable' );
+				if ( self::human_choice() !== $on ) {
+					self::store( $on );
+				}
+				return;
+			}
+		}
 	}
 
 	/** True when the human's ajax toggle in this request names OUR plugin and asks for "enable". */
@@ -359,7 +459,7 @@ final class Ovp_Updater {
 	 * leaves our membership unchanged and does nothing.
 	 * Turning it OFF is always honoured for a non-remote user with update_plugins (disabling is safe).
 	 * Turning it ON is honoured only for the Plugins-screen ajax toggle that names our plugin with
-	 * state=enable. WP-CLI and bulk non-ajax enables are refused: use the settings-page checkbox.
+	 * state=enable. WP-CLI and bulk non-ajax enables are refused: use the settings-page button.
 	 *
 	 * @param mixed $old Previous value (array or false).
 	 * @param mixed $new New value.
@@ -407,7 +507,7 @@ final class Ovp_Updater {
 	 */
 	public static function filter_auto_update( $update, $item ) {
 		if ( ! is_object( $item ) || ( $item->plugin ?? '' ) !== self::basename() ) {
-			return $update;
+			return $update; // Any other plugin: input returned unchanged, in both directions.
 		}
 		if ( null === $update ) {
 			return null; // Plugins-list UI probe: keep WordPress's toggle visible.
@@ -415,9 +515,9 @@ final class Ovp_Updater {
 		if ( ! self::auto_enabled() ) {
 			return false;
 		}
-		$r = Ovp_Release::current();
-		return ! empty( $r['verified'] ) && is_array( $r['index'] )
-			&& isset( $item->new_version ) && (string) $item->new_version === (string) $r['index']['version'];
+		// True only for the verified, newer, requirement-satisfying signed release that is on offer.
+		$o = self::current_offer();
+		return null !== $o && isset( $item->new_version ) && (string) $item->new_version === (string) $o['index']['version'];
 	}
 
 	/**
@@ -438,8 +538,8 @@ final class Ovp_Updater {
 			return $html;
 		}
 		$line = $mine
-			? 'Effective: on (set in Settings > Overlord WP Fleet).'
-			: 'Effective: off. Turn it on in Settings > Overlord WP Fleet.';
+			? 'Effective: on (this plugin updates itself automatically; change it in Settings > Overlord WP Fleet).'
+			: 'Effective: off (turned off by an admin). Turn it on in Settings > Overlord WP Fleet.';
 		return $html . '<br><span class="description">' . esc_html( $line ) . '</span>';
 	}
 }

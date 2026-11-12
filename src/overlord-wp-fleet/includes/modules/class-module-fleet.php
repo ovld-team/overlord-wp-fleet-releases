@@ -3,7 +3,7 @@
  * Fleet control routes: fleet/status, revoke, cap, rotate-keys, fleet/legacy-retire, fleet/self-update and
  * fleet/self-rollback (both T3). The 1.x proxy-triggered self-update that took a URL is gone. Since 2.0.7 a
  * signed request can only ask for the latest release this site itself verified against its pinned keys
- * (Ovp_Release); it runs the native bulk upgrader (Ovp_Self_Update). Auto-update opt-in stays wp-admin only.
+ * (Ovp_Release); it runs the native bulk upgrader (Ovp_Self_Update). The automatic-update setting (ON by default since 2.0.8, this plugin only) can be changed in wp-admin only.
  * Only these signed routes and the automatic update are signature-checked; at effective tier T3 the master can
  * also replace the plugin with any ZIP through plugins/install (no signature check, version floor 2.0.6, human-requested).
  *

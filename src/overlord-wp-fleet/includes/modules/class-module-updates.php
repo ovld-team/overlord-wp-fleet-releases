@@ -65,7 +65,7 @@ class Ovp_Module_Updates extends Ovp_Module_Base {
 				'version'           => (string) ( $data['Version'] ?? '' ),
 				'new_version'       => $new_version,
 				'update_available'  => is_string( $new_version ) && '' !== $new_version,
-				'auto_update'       => in_array( $file, $auto_plugins, true ),
+				'auto_update'       => ( class_exists( 'Ovp_Updater' ) && Ovp_Updater::basename() === $file ) ? Ovp_Updater::auto_enabled() : in_array( $file, $auto_plugins, true ),
 			);
 		}
 
