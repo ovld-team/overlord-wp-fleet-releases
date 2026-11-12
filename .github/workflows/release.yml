@@ -1,0 +1,67 @@
+# Owner setup, once, before the first tag (no secret is ever stored in this repository):
+#   1. Create the environment `release` (Settings > Environments) and restrict deployment to tags matching `v*`.
+#   2. Add a tag ruleset for `v*`: only the release bot/owner may create, nobody may update or delete.
+#   3. Add the environment secret OVP_RELEASE_SIGNING_KEY (base64 PKCS8 DER, made by tools/gen-release-key.mjs).
+#   4. Add the repository variable OVP_RELEASE_KEY_ID (the key id).
+#   Optional during rotation: environment secret(s) named in the variable OVP_RELEASE_EXTRA_SIGNING_KEYS
+#   (JSON array of {key_id, key_env_name}); each named secret must also be mapped in the sign step below.
+name: release
+on:
+  push:
+    tags: ['v*.*.*']
+permissions:
+  contents: write
+concurrency: release
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4 (v4.4.0)
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4 (v4.4.0)
+        with:
+          node-version: 22
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2 (2.40.0)
+        with:
+          php-version: '8.3'
+          tools: none
+          coverage: none
+      - name: Preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OVP_RELEASE_KEY_ID: ${{ vars.OVP_RELEASE_KEY_ID }}
+        run: node tools/preflight.mjs --tag "$GITHUB_REF_NAME"
+      - name: Lint PHP
+        run: |
+          set -e
+          find src -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
+      - name: Build
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          node tools/build-zip.mjs --src src/overlord-wp-fleet --out dist | tee dist-build.log
+          SHA=$(sha256sum "dist/overlord-wp-fleet-${VERSION}.zip" | cut -d' ' -f1)
+          EXPECTED=$(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync("SOURCE.json","utf8")).expected_sha256))')
+          if [ "$SHA" != "$EXPECTED" ]; then echo "sha256 differs from SOURCE.json" >&2; exit 1; fi
+      - name: Sign
+        env:
+          OVP_RELEASE_SIGNING_KEY: ${{ secrets.OVP_RELEASE_SIGNING_KEY }}
+          OVP_RELEASE_KEY_ID: ${{ vars.OVP_RELEASE_KEY_ID }}
+          OVP_RELEASE_EXTRA_SIGNING_KEYS: ${{ vars.OVP_RELEASE_EXTRA_SIGNING_KEYS }}
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          node tools/sign-release.mjs --zip "dist/overlord-wp-fleet-${VERSION}.zip" --src src/overlord-wp-fleet --out dist/release-index.json
+      - name: Verify
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          node tools/verify-release.mjs --index dist/release-index.json --zip "dist/overlord-wp-fleet-${VERSION}.zip" --src src/overlord-wp-fleet --keys keys/release-keys.json
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" "dist/overlord-wp-fleet-${VERSION}.zip" dist/release-index.json \
+            --verify-tag --latest --title "Overlord WP Fleet ${VERSION}" --notes-file dist/notes.md

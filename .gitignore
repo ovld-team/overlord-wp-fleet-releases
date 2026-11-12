@@ -1,0 +1,6 @@
+dist/
+*.key
+*.pem
+*.der
+.env*
+node_modules/
