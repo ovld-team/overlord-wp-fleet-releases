@@ -284,15 +284,20 @@ final class Ovp_Auth {
 		$required  = $is_revoke ? 0 : self::required_tier( $method, $path, $declared );
 		$eff       = Ovp_Tiers::effective( $res->tier );
 		if ( $required > $eff ) {
+			$unset = Ovp_Tiers::cap_unset();
+			$data  = array(
+				'status'    => 403,
+				'code'      => 'tier_denied',
+				'required'  => Ovp_Tiers::name( $required ),
+				'effective' => Ovp_Tiers::name( $eff ),
+			);
+			if ( $unset ) {
+				$data['cap_unset'] = true;
+			}
 			return new WP_Error(
 				'ovp_tier_denied',
-				'This operation needs ' . Ovp_Tiers::name( $required ) . ' but the effective tier is ' . Ovp_Tiers::name( $eff ) . '. The site admin controls the cap in wp-admin.',
-				array(
-					'status'    => 403,
-					'code'      => 'tier_denied',
-					'required'  => Ovp_Tiers::name( $required ),
-					'effective' => Ovp_Tiers::name( $eff ),
-				)
+				'This operation needs ' . Ovp_Tiers::name( $required ) . ' but the effective tier is ' . Ovp_Tiers::name( $eff ) . '. ' . ( $unset ? Ovp_Tiers::CAP_UNSET_TEXT : 'The site admin controls the cap in wp-admin.' ),
+				$data
 			);
 		}
 

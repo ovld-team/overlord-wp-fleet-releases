@@ -163,11 +163,8 @@ class Ovp_Module_Plugins_Themes extends Ovp_Module_Base {
 			return $safe;
 		}
 		require_once ABSPATH . 'wp-admin/includes/file.php';
-		$tmp = Ovp_Net::with_safe_http(
-			static function () use ( $zip_url ) {
-				return download_url( $zip_url, 60 );
-			}
-		);
+		// Tier T3 only (both install routes gate T3): follows up to 3 redirects, only to GitHub's release hosts.
+		$tmp = Ovp_Net::download_following_redirects( $zip_url, 60, (int) OVP_Upload::cfg( 'max_total' ) );
 		if ( is_wp_error( $tmp ) ) {
 			return $this->error( 'mcp_bridge_install_failed', $tmp->get_error_message(), 400 );
 		}

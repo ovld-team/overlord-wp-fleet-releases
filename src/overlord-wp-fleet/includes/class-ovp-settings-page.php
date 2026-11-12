@@ -373,6 +373,9 @@ class Ovp_Settings_Page {
 			);
 			self::row( __( 'Tier cap', 'overlord-wp-fleet' ), self::TIER_LABELS[ $cap['cap'] ] ?? Ovp_Tiers::name( $cap['cap'] ) );
 			self::row( __( 'Effective cap right now', 'overlord-wp-fleet' ), Ovp_Tiers::name( Ovp_Tiers::cap_now() ) );
+			if ( Ovp_Tiers::cap_unset() ) {
+				self::row( __( 'Cap not set', 'overlord-wp-fleet' ), Ovp_Tiers::CAP_UNSET_TEXT );
+			}
 		}
 		$mig = Ovp_Migration::status();
 		if ( null !== $mig ) {
@@ -463,6 +466,9 @@ class Ovp_Settings_Page {
 		$s   = Ovp_Tiers::cap_state();
 		$max = Ovp_Tiers::max_cap();
 		echo '<div class="ovp-card"><h2>' . esc_html__( 'Tier cap', 'overlord-wp-fleet' ) . '</h2>';
+		if ( Ovp_Tiers::cap_unset() ) {
+			echo '<div class="notice notice-warning inline"><p><strong>' . esc_html__( 'No cap is stored on this site.', 'overlord-wp-fleet' ) . '</strong> ' . esc_html( Ovp_Tiers::CAP_UNSET_TEXT ) . '</p></div>';
+		}
 		echo '<p>' . esc_html__( 'The master can never act above this cap. Pairing set it to the tier you approved. You can change it here at any time; lowering it here also stops the master from raising it back. The master itself can only lower it, or raise it back up to the tier you approved at pairing.', 'overlord-wp-fleet' ) . '</p>';
 		echo '<form method="post">';
 		wp_nonce_field( 'ovp_set_cap', 'ovp_cap_nonce' );

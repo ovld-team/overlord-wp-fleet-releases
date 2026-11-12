@@ -91,8 +91,13 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 
 	/**
 	 * Jail to WP_CONTENT_DIR or ABSPATH. Never above the site root.
+	 *
+	 * With $for_write a missing parent chain is accepted: the target is resolved through the deepest
+	 * EXISTING ancestor (realpath, so a symlink out of the root is still refused) plus the missing plain
+	 * segments (normalize_rel() already rejected every `..`). Nothing is created here; the writers call
+	 * ensure_parent_dir() after every check passed.
 	 */
-	private function resolve( string $relative ): string|WP_Error {
+	private function resolve( string $relative, bool $for_write = false ): string|WP_Error {
 		if ( str_contains( $relative, "\0" ) ) {
 			return new WP_Error( 'mcp_bridge_path_escape', 'Path escapes site root.', array( 'status' => 400 ) );
 		}
@@ -122,6 +127,9 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 
 		if ( false === $target ) {
 			$parent = realpath( dirname( $base_fs . '/' . $relative ) );
+			if ( false === $parent && $for_write ) {
+				$parent = $this->deepest_existing_parent( dirname( $base_fs . '/' . $relative ), $root );
+			}
 			if ( false === $parent || ! Ovp_Net::path_inside( $parent, $root ) ) {
 				return new WP_Error( 'mcp_bridge_path_escape', 'Path escapes site root.', array( 'status' => 400 ) );
 			}
@@ -133,12 +141,108 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		$plugin_root = defined( 'OVP_FLEET_DIR' ) ? realpath( OVP_FLEET_DIR ) : false;
 		if ( is_string( $plugin_root ) && ! $god ) {
 			$compare = is_string( $parent ) ? $parent : $target;
-			if ( Ovp_Net::path_inside( $compare, $plugin_root ) || Ovp_Net::path_inside( $plugin_root, $target ) ) {
+			if ( self::deny_inside( $compare, $plugin_root ) || self::deny_inside( $plugin_root, $target ) ) {
 				return new WP_Error( 'mcp_bridge_self_protected', 'Cannot touch the Overlord plugin directory below effective tier T3.', array( 'status' => 403 ) );
 			}
 		}
 
 		return $target;
+	}
+
+	/**
+	 * Real path of a not-yet-existing directory: realpath of its deepest existing ancestor (inside $root)
+	 * plus the missing segments. False when the chain hits a symlink with no target, leaves $root, or runs out.
+	 */
+	private function deepest_existing_parent( string $dir, string $root ): string|false {
+		$tail = array();
+		$cur  = $dir;
+		for ( $i = 0; $i < 64; $i++ ) {
+			if ( is_link( $cur ) ) {
+				return false; // A dangling link in the chain: never create through it.
+			}
+			$real = realpath( $cur );
+			if ( false !== $real ) {
+				if ( ! Ovp_Net::path_inside( $real, $root ) || ! is_dir( $real ) ) {
+					return false;
+				}
+				return array() === $tail ? $real : $real . '/' . implode( '/', array_reverse( $tail ) );
+			}
+			$up = dirname( $cur );
+			if ( $up === $cur ) {
+				return false;
+			}
+			$tail[] = basename( $cur );
+			$cur    = $up;
+		}
+		return false;
+	}
+
+	/**
+	 * Create the missing parent directories of a resolved target ONE SEGMENT AT A TIME (non-recursive mkdir), re-checking
+	 * after each that the new directory is a real directory (not a link) whose realpath is still inside the root. Stops
+	 * on the first failure and removes what it created. $created lists the directories made by this call, outermost first,
+	 * so the caller can remove them again (rmdir_created) when the write that follows is refused.
+	 *
+	 * @param list<string> $created
+	 */
+	private function ensure_parent_dir( string $path, string $rel, array &$created ): ?WP_Error {
+		$created = array();
+		$dir     = dirname( $path );
+		if ( is_dir( $dir ) ) {
+			return null;
+		}
+		[ $scope ] = $this->split_scope( $rel );
+		$root      = realpath( 'abspath' === $scope ? ABSPATH : WP_CONTENT_DIR );
+		$escape    = new WP_Error( 'mcp_bridge_path_escape', 'Path escapes site root.', array( 'status' => 400 ) );
+		if ( false === $root ) {
+			return $escape;
+		}
+		$missing = array();
+		$cur     = $dir;
+		for ( $i = 0; $i < 64 && ! is_dir( $cur ); $i++ ) {
+			$missing[] = $cur;
+			$up        = dirname( $cur );
+			if ( $up === $cur ) {
+				return $escape;
+			}
+			$cur = $up;
+		}
+		$fail = function ( WP_Error $e ) use ( &$created ): WP_Error {
+			$this->rmdir_created( $created );
+			$created = array();
+			return $e;
+		};
+		foreach ( array_reverse( $missing ) as $d ) {
+			if ( is_link( $d ) ) {
+				return $fail( $escape );
+			}
+			if ( ! @mkdir( $d, 0755 ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				return $fail( $this->error( 'ovp_write_failed', 'Cannot create the destination directory.', 500 ) );
+			}
+			$created[] = $d;
+			$real      = realpath( $d );
+			if ( is_link( $d ) || false === $real || ! Ovp_Net::path_inside( $real, $root ) ) {
+				return $fail( $escape );
+			}
+		}
+		return null;
+	}
+
+	/** Remove directories this request created, innermost first, only while they are empty (rmdir refuses otherwise). @param list<string> $created */
+	private function rmdir_created( array $created ): void {
+		foreach ( array_reverse( $created ) as $d ) {
+			if ( is_dir( $d ) && ! is_link( $d ) ) {
+				@rmdir( $d ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- only succeeds when empty.
+			}
+		}
+	}
+
+	/** Prefix check for the protected-path denylists: case-insensitive on case-insensitive filesystems (macOS, Windows). */
+	private static function deny_inside( string $path, string $base ): bool {
+		if ( in_array( PHP_OS_FAMILY, array( 'Darwin', 'Windows' ), true ) ) {
+			return Ovp_Net::path_inside( strtolower( $path ), strtolower( $base ) );
+		}
+		return Ovp_Net::path_inside( $path, $base );
 	}
 
 	private function public_path( string $path ): string {
@@ -290,7 +394,7 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 			return $blocked;
 		}
 
-		$path = $this->resolve( $rel );
+		$path = $this->resolve( $rel, true );
 		if ( is_wp_error( $path ) ) {
 			return $path;
 		}
@@ -330,9 +434,18 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 			return $this->error( 'ovp_upload_hash', 'sha256 mismatch.', 422 );
 		}
 
+		// Missing parent directories are created only now, after the jail, self-protection, confirm and payload checks
+		// above, one segment at a time with the jail re-checked on each. If the lint or the write then refuses, the
+		// folders created here are removed again (only while empty).
+		$created = array();
+		$mk      = $this->ensure_parent_dir( $path, $rel, $created );
+		if ( null !== $mk ) {
+			return $mk;
+		}
 		// Lint (php files) happens inside atomic_write BEFORE the live file is touched.
 		$res = OVP_Upload::atomic_write( $path, $content, array( 'rel' => $rel ) );
 		if ( is_wp_error( $res ) ) {
+			$this->rmdir_created( $created ); // A refused lint or failed write leaves no new empty folders behind.
 			return $res;
 		}
 		return $this->success(
@@ -359,7 +472,7 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		if ( null !== $blocked ) {
 			return $blocked;
 		}
-		$path = $this->resolve( $rel );
+		$path = $this->resolve( $rel, true );
 		if ( is_wp_error( $path ) ) {
 			return $path;
 		}
@@ -367,8 +480,17 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		if ( null !== $blocked ) {
 			return $blocked;
 		}
+		$created = array();
+		$mk      = $this->ensure_parent_dir( $path, $rel, $created );
+		if ( null !== $mk ) {
+			return $mk;
+		}
 		$res = OVP_Upload::restore_file_backup( (string) ( $body['backup'] ?? '' ), $path, $rel );
-		return is_wp_error( $res ) ? $res : $this->success( array( 'path' => $this->public_path( $path ), 'restored' => true ) + $res );
+		if ( is_wp_error( $res ) ) {
+			$this->rmdir_created( $created );
+			return $res;
+		}
+		return $this->success( array( 'path' => $this->public_path( $path ), 'restored' => true ) + $res );
 	}
 
 	// -- Upload pipeline -------------------------------------------------------------------------
@@ -413,7 +535,7 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		if ( null !== $blocked ) {
 			return $blocked;
 		}
-		$dest = $this->resolve( $rel );
+		$dest = $this->resolve( $rel, true );
 		if ( is_wp_error( $dest ) ) {
 			return $dest;
 		}
@@ -472,7 +594,7 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		if ( null !== $blocked ) {
 			return $blocked;
 		}
-		$dest = $this->resolve( $rel );
+		$dest = $this->resolve( $rel, true );
 		if ( is_wp_error( $dest ) ) {
 			return $dest;
 		}
@@ -480,8 +602,14 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		if ( null !== $blocked ) {
 			return $blocked;
 		}
+		$created = array();
+		$mk      = $this->ensure_parent_dir( $dest, $rel, $created );
+		if ( null !== $mk ) {
+			return $mk;
+		}
 		$res = OVP_Upload::finalize_file( $id, OVP_Meta::request_tier( $request ), array( 'dest' => $dest ) );
 		if ( is_wp_error( $res ) ) {
+			$this->rmdir_created( $created );
 			return $res;
 		}
 		return $this->success( $res + array( 'path' => $this->public_path( $dest ) ) );
@@ -544,6 +672,10 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 
 	private function normalize_rel( string $relative ): string {
 		$relative = str_replace( '\\', '/', $relative );
+		// ':' names a Windows alternate data stream ("wp-config.php::$DATA") or a drive; no legitimate WordPress path needs it.
+		if ( str_contains( $relative, ':' ) ) {
+			return '';
+		}
 		$relative = ltrim( $relative, '/' );
 		$parts    = array();
 		foreach ( explode( '/', $relative ) as $seg ) {
@@ -598,7 +730,10 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 				403
 			);
 		}
-		if ( str_starts_with( $lower, 'uploads/mcp-bridge/' ) ) {
+		foreach ( array( 'uploads/mcp-bridge', 'wp-content/uploads/mcp-bridge' ) as $store_rel ) {
+			if ( $lower !== $store_rel && ! str_starts_with( $lower, $store_rel . '/' ) ) {
+				continue;
+			}
 			return $this->error(
 				'mcp_bridge_dropin_denied',
 				'Refusing to write uploads/mcp-bridge via files_write. Use debug_fatals.',
@@ -608,17 +743,29 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 		return null;
 	}
 
+	/** Inside wp-content/uploads/mcp-bridge, whether or not the folder exists yet (the real path AND the unresolved one). */
+	private function in_plugin_store( string $path ): bool {
+		$store = realpath( WP_CONTENT_DIR . '/uploads/mcp-bridge' );
+		if ( is_string( $store ) && self::deny_inside( $path, $store ) ) {
+			return true;
+		}
+		$wc = realpath( WP_CONTENT_DIR );
+		if ( is_string( $wc ) && self::deny_inside( $path, $wc . '/uploads/mcp-bridge' ) ) {
+			return true;
+		}
+		return self::deny_inside( $path, rtrim( WP_CONTENT_DIR, '/\\' ) . '/uploads/mcp-bridge' );
+	}
+
 	private function write_blocked_resolved( string $path ): ?WP_Error {
 		$mu = realpath( defined( 'WPMU_PLUGIN_DIR' ) ? WPMU_PLUGIN_DIR : WP_CONTENT_DIR . '/mu-plugins' );
-		if ( ! $this->god() && is_string( $mu ) && Ovp_Net::path_inside( $path, $mu ) ) {
+		if ( ! $this->god() && is_string( $mu ) && self::deny_inside( $path, $mu ) ) {
 			return $this->error(
 				'mcp_bridge_mu_plugin_denied',
 				'Writing mu-plugins needs effective tier T3. Use debug_fatals / files_delete below T3.',
 				403
 			);
 		}
-		$store = realpath( WP_CONTENT_DIR . '/uploads/mcp-bridge' );
-		if ( is_string( $store ) && Ovp_Net::path_inside( $path, $store ) ) {
+		if ( $this->in_plugin_store( $path ) ) {
 			return $this->error(
 				'mcp_bridge_dropin_denied',
 				'Refusing to write uploads/mcp-bridge via files_write.',
@@ -626,7 +773,7 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 			);
 		}
 		$base = OVP_Upload::base_dir();
-		if ( is_string( $base ) && Ovp_Net::path_inside( $path, $base ) ) {
+		if ( is_string( $base ) && self::deny_inside( $path, $base ) ) {
 			return $this->error( 'ovp_protected_path', 'Refusing to write the plugin staging area.', 403 );
 		}
 		return null;
@@ -634,11 +781,10 @@ class Ovp_Module_Files extends Ovp_Module_Base {
 
 	private function read_blocked_resolved( string $path ): ?WP_Error {
 		$base = OVP_Upload::base_dir();
-		if ( is_string( $base ) && Ovp_Net::path_inside( $path, $base ) ) {
+		if ( is_string( $base ) && self::deny_inside( $path, $base ) ) {
 			return $this->error( 'ovp_protected_path', 'The plugin staging and backup area is not readable.', 403 );
 		}
-		$store = realpath( WP_CONTENT_DIR . '/uploads/mcp-bridge' );
-		if ( is_string( $store ) && Ovp_Net::path_inside( $path, $store ) && 'fatal-latest.json' !== basename( $path ) ) {
+		if ( $this->in_plugin_store( $path ) && 'fatal-latest.json' !== basename( $path ) ) {
 			return $this->error( 'ovp_protected_path', 'The plugin store is not readable.', 403 );
 		}
 		return null;

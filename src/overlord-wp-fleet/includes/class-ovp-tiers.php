@@ -108,6 +108,19 @@ final class Ovp_Tiers {
 	}
 
 	/**
+	 * True when no cap was ever stored (a site paired by a plugin before 2.0.7, before the consent model): cap_state() then
+	 * falls back to DEFAULT_CAP (T1) whatever the master's policy cap says. Read-only; nothing here writes the option, and
+	 * nothing may raise the cap implicitly because of it.
+	 */
+	public static function cap_unset(): bool {
+		$v = get_option( self::CAP_OPTION, null );
+		return ! is_array( $v ) || ! isset( $v['cap'] );
+	}
+
+	/** Why the effective tier is T1 on a site with no stored cap. Used by the refusal message and the settings page. */
+	public const CAP_UNSET_TEXT = 'This site was paired before the consent model, so no tier cap is stored here and the effective tier falls back to T1: set the cap in wp-admin (Settings > Overlord WP Fleet) or re-pair to grant T3.';
+
+	/**
 	 * Record the tier the human granted at pairing (consent screen) as cap and ceiling. With a
 	 * grant, `raise` is on so a signed master request can come back up to the grant after a lower;
 	 * without one (migration autopair, an older master) the safe default applies and nothing can

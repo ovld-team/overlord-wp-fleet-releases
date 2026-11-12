@@ -4,7 +4,7 @@ Tags: rest-api, automation, ai, agent, management
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 8.3
-Stable tag: 2.0.8
+Stable tag: 2.0.9
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -55,6 +55,9 @@ Deleting the plugin removes only what it created: its own `ovp_*` options, its r
 
 == Upgrade Notice ==
 
+= 2.0.9 =
+2.0.9: the Fleet site list can show your site's icon (a PNG, JPEG, WebP, GIF or ICO of at most 20 KB, never SVG, read from disk). A site paired before 2.0.7 that has no stored tier cap now says so in Settings > Overlord WP Fleet and reports it to the master. Installing from a GitHub release URL works again.
+
 = 2.0.8 =
 2.0.8: the plugin now updates itself automatically; turn it off in Settings > Overlord WP Fleet. Only this plugin is affected, and only signed newer releases are installed. Sites that never explicitly chose are switched on.
 
@@ -62,6 +65,16 @@ Deleting the plugin removes only what it created: its own `ovp_*` options, its r
 A site that was paired by 2.0.6 and has remote raising switched on but no stored ceiling is no longer allowed to be raised back to T3 by the master on its own: its ceiling is now its current cap. To allow T3 again, re-pair the site or set the tier in wp-admin (Settings > Overlord WP Fleet).
 
 == Changelog ==
+
+= 2.0.9 =
+* New: the heartbeat carries the site icon (WordPress site icon, then ABSPATH/favicon.ico, then the active theme's favicon.ico / favicon.png) as `{mime, b64, sha256}`, only when the file really is a PNG, JPEG, WebP, GIF or ICO (magic bytes) and at most 20 KB; a larger raster is downscaled to 64x64 PNG with the WordPress image editor. SVG is never sent. Any error sends nothing.
+* New: the heartbeat and the info route carry `cap_unset` (true when no tier cap is stored, which is the case for a site paired before 2.0.7). The refusal message and the settings page explain it: set the cap in wp-admin or re-pair to grant T3. Nothing raises the cap implicitly.
+* Fixed: a refused re-pair (the site is already paired) no longer deletes the stored tier cap.
+* Fixed: `files_write` into a new subdirectory creates the missing parents inside the site root (never through a symlink out of it, never above the root).
+* Fixed: `db_exec` DDL (CREATE/ALTER/DROP TABLE) returned an HTTP 500 type error although the statement ran; it now returns rows_affected 0. DDL on the users, usermeta and options tables is still refused.
+* Fixed: `plugins_install` / `themes_install` from a GitHub release URL follow up to 3 redirects, only to github.com, objects.githubusercontent.com and release-assets.githubusercontent.com (https, no credentials, public addresses only).
+* Fixed: `apply_elementor` clears the written page's own Elementor CSS and page-cache entries (LiteSpeed and WP Rocket purge-by-post when present) and nothing site-wide.
+* Updating, replacing or rolling back never deletes or changes content.
 
 = 2.0.8 =
 * Changed: this plugin, and only this plugin, now updates itself automatically by default, through WordPress's own unattended update path. Nothing else is automatic: WordPress core, other plugins, themes, translations and content are untouched, and the `auto_update_plugin` filter returns every other plugin's decision unchanged.

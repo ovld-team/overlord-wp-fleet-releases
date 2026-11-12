@@ -138,7 +138,13 @@ final class OVP_Db_Backend_WP implements OVP_Db_Backend {
 
 	public function exec( string $sql ): int|false {
 		global $wpdb;
-		return $wpdb->query( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL -- tokenizer-validated, prepared.
+		$r = $wpdb->query( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL -- tokenizer-validated, prepared.
+		// wpdb::query() returns int rows for DML, true for DDL (CREATE/DROP/ALTER) and false/null on failure.
+		// Declared int|false: DDL succeeded with 0 rows affected.
+		if ( false === $r || null === $r ) {
+			return false;
+		}
+		return is_int( $r ) ? $r : 0;
 	}
 
 	public function begin( bool $read_only ): void {

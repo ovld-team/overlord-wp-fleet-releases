@@ -105,7 +105,72 @@ class Ovp_Module_Builder_Apply extends Ovp_Module_Base {
 			}
 		}
 
-		return $this->success( $this->applied_result( $post_id ) + array( 'snapshots' => $snapshots ) );
+		// T1 tool: only THIS post's own caches are cleared (the front end must not keep the old layout), never a
+		// site-wide purge. A cache failure never fails the write that already succeeded.
+		$cache = $this->clear_post_cache( (int) $post_id );
+
+		return $this->success( $this->applied_result( $post_id ) + array( 'snapshots' => $snapshots, 'cache' => $cache ) );
+	}
+
+	/**
+	 * Post-level cache clear after apply_elementor. Touches only caches derived from this post:
+	 * Elementor's per-post CSS meta + generated post-{id}.css, the WordPress post cache, and the
+	 * purge-by-post hooks of LiteSpeed Cache and WP Rocket when present. No wp_cache_flush(), no
+	 * Elementor files_manager->clear_cache() (that one regenerates every page), no purge-all hook.
+	 *
+	 * @return array<string,string>
+	 */
+	private function clear_post_cache( int $post_id ): array {
+		$report = array();
+		if ( $post_id <= 0 ) {
+			return $report;
+		}
+		try {
+			foreach ( array( '_elementor_css', '_elementor_element_cache', '_elementor_page_assets' ) as $key ) {
+				delete_post_meta( $post_id, $key );
+			}
+			$cls = '\\Elementor\\Core\\Files\\CSS\\Post';
+			if ( class_exists( $cls ) && is_callable( array( $cls, 'create' ) ) ) {
+				$file = call_user_func( array( $cls, 'create' ), $post_id );
+				if ( is_object( $file ) && is_callable( array( $file, 'delete' ) ) ) {
+					$file->delete();
+				}
+			} elseif ( function_exists( 'wp_get_upload_dir' ) ) {
+				$up = wp_get_upload_dir();
+				$f  = rtrim( (string) ( $up['basedir'] ?? '' ), '/' ) . '/elementor/css/post-' . $post_id . '.css';
+				if ( '' !== (string) ( $up['basedir'] ?? '' ) && is_file( $f ) ) {
+					@unlink( $f ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- best-effort cache file.
+				}
+			}
+			$report['elementor'] = 'post_cleared';
+		} catch ( \Throwable $e ) {
+			$report['elementor'] = 'error';
+		}
+		try {
+			if ( function_exists( 'clean_post_cache' ) ) {
+				clean_post_cache( $post_id );
+				$report['wp'] = 'post_cache_cleaned';
+			}
+		} catch ( \Throwable $e ) {
+			$report['wp'] = 'error';
+		}
+		try {
+			if ( has_action( 'litespeed_purge_post' ) ) {
+				do_action( 'litespeed_purge_post', $post_id );
+				$report['litespeed'] = 'purged_post';
+			}
+		} catch ( \Throwable $e ) {
+			$report['litespeed'] = 'error';
+		}
+		try {
+			if ( function_exists( 'rocket_clean_post' ) ) {
+				rocket_clean_post( $post_id );
+				$report['wp_rocket'] = 'purged_post';
+			}
+		} catch ( \Throwable $e ) {
+			$report['wp_rocket'] = 'error';
+		}
+		return $report;
 	}
 
 	/**

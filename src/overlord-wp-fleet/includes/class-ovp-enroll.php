@@ -176,8 +176,11 @@ final class Ovp_Enroll {
 		if ( '' === $url ) {
 			return array( 'ok' => false, 'code' => 'not_configured' );
 		}
-		// Safe default before any key exists: a stale god cap from an earlier pairing must not survive.
-		delete_option( Ovp_Tiers::CAP_OPTION );
+		// Safe default before any key exists: a stale god cap from an earlier pairing must not survive. Never while a
+		// key is bound: a refused re-pair (already_bound) used to wipe the stored cap and silently drop the site to T1.
+		if ( ! Ovp_Keys::is_bound() ) {
+			delete_option( Ovp_Tiers::CAP_OPTION );
+		}
 		$res = Ovp_Pair::pair( $pairing_string, $url, $cfg['mode'], $consent_hash, self::meta(), self::transport(), null, $implied_admin );
 		if ( ! $res['ok'] ) {
 			return $res;

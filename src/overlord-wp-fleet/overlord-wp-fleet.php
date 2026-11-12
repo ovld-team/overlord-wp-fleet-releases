@@ -5,7 +5,7 @@
  * Description:       Signed (Ed25519), tiered remote management for WordPress. Pair this site with an
  *                    Overlord WP Fleet master (or local agent) using a one-time code. Every request is
  *                    cryptographically signed, replay-protected and limited by a tier cap you control.
- * Version:           2.0.8
+ * Version:           2.0.9
  * Update URI:        https://github.com/ovld-team/overlord-wp-fleet-releases
  * Requires at least: 6.0
  * Requires PHP:      8.3
@@ -59,7 +59,7 @@ unset( $ovp_php_id );
  * (autopair, legacy deactivation and credential wipe) is Ovp_Migration.
  */
 
-define( 'OVP_FLEET_VERSION', '2.0.8' );
+define( 'OVP_FLEET_VERSION', '2.0.9' );
 define( 'OVP_FLEET_FILE', __FILE__ );
 
 /*
@@ -91,6 +91,7 @@ require_once OVP_FLEET_DIR . 'includes/class-ovp-log.php';
 require_once OVP_FLEET_DIR . 'includes/class-ovp-net.php';
 require_once OVP_FLEET_DIR . 'includes/class-ovp-auth.php';
 require_once OVP_FLEET_DIR . 'includes/class-ovp-enroll.php';
+require_once OVP_FLEET_DIR . 'includes/class-ovp-site-icon.php';
 require_once OVP_FLEET_DIR . 'includes/class-ovp-fleet.php';
 require_once OVP_FLEET_DIR . 'includes/class-ovp-errors.php';
 require_once OVP_FLEET_DIR . 'includes/class-ovp-chunk.php';

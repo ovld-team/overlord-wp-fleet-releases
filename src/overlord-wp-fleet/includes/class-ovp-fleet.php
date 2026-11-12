@@ -170,6 +170,15 @@ final class Ovp_Fleet {
 		}
 	}
 
+	/** Site icon for the heartbeat; any failure is null and never reaches the heartbeat. @return array{mime:string,b64:string,sha256:string}|null */
+	private static function icon(): ?array {
+		try {
+			return Ovp_Site_Icon::collect();
+		} catch ( \Throwable $e ) {
+			return null;
+		}
+	}
+
 	/** Lean site facts shared by the info route and the heartbeat. @return array<string,mixed> */
 	public static function info(): array {
 		global $wp_version;
@@ -186,6 +195,8 @@ final class Ovp_Fleet {
 			'is_multisite'   => is_multisite(),
 			'tier_cap'       => Ovp_Tiers::name( $cap['cap'] ),
 			'tier_cap_now'   => Ovp_Tiers::name( Ovp_Tiers::cap_now() ),
+			// true = bound but no cap stored (paired before the consent model): the effective tier is T1 until the admin sets it or re-pairs.
+			'cap_unset'      => Ovp_Keys::is_bound() && Ovp_Tiers::cap_unset(),
 			'god_until'      => $cap['god_until'] > time() ? $cap['god_until'] : 0,
 			'flavor'         => 1 === Ovp_Tiers::max_cap() ? 'connector' : 'full',
 			'capabilities'   => array( 'self-update' ),
@@ -242,6 +253,8 @@ final class Ovp_Fleet {
 			array(
 				'v'         => 1,
 				'inventory' => self::inventory(),
+				// {mime,b64,sha256} of the site icon (<= 20 KB, never SVG) or null. Heartbeat only, never the info route.
+				'icon'      => self::icon(),
 			)
 		);
 		if ( isset( $state['proposal'] ) && is_array( $state['proposal'] ) ) {
