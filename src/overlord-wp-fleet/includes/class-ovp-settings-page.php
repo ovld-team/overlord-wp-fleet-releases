@@ -277,6 +277,7 @@ class Ovp_Settings_Page {
 			self::render_connection();
 			self::render_pair( $res['review'] );
 		}
+		self::render_agent_connect();
 		self::render_updates();
 		self::render_maintenance();
 		echo '</div>';
@@ -521,6 +522,27 @@ class Ovp_Settings_Page {
 		echo '<p><label><input type="checkbox" name="confirm_unpair" value="1"> ' . esc_html__( 'Yes, unpair this site.', 'overlord-wp-fleet' ) . '</label></p>';
 		submit_button( __( 'Unpair', 'overlord-wp-fleet' ), 'delete' );
 		echo '</form></div>';
+	}
+
+	/** Read-only card: how to connect an AI agent to the master. No secret is shown or stored. */
+	private static function render_agent_connect(): void {
+		$info = Ovp_Module_Site_Info::agent_connect_info();
+		$snip = (array) $info['snippets'];
+		echo '<div class="ovp-card"><h2>' . esc_html__( 'Connect an AI agent', 'overlord-wp-fleet' ) . '</h2>';
+		echo '<p>' . esc_html__( 'AI agents talk to your Fleet master, not to this site. Create a personal API token in the Fleet panel and put it in place of YOUR_FLEET_API_TOKEN. This page never shows or stores a token.', 'overlord-wp-fleet' ) . '</p>';
+		echo '<table class="ovp-kv">';
+		self::row( __( 'MCP URL', 'overlord-wp-fleet' ), (string) $info['mcp_url'], true );
+		if ( '' !== (string) $info['site'] ) {
+			self::row( __( 'Site id (the "site" argument)', 'overlord-wp-fleet' ), (string) $info['site'], true );
+		}
+		echo '</table>';
+		foreach ( array( 'claude_code' => 'Claude Code', 'cursor' => 'Cursor (.cursor/mcp.json)', 'generic' => 'Other MCP clients' ) as $k => $label ) {
+			echo '<h3>' . esc_html( $label ) . '</h3><pre class="ovp-mono" style="white-space:pre-wrap;background:#f6f7f7;padding:8px">' . esc_html( (string) ( $snip[ $k ] ?? '' ) ) . '</pre>';
+		}
+		foreach ( (array) $info['notes'] as $n ) {
+			echo '<p class="description">' . esc_html( (string) $n ) . '</p>';
+		}
+		echo '</div>';
 	}
 
 	private static function render_maintenance(): void {

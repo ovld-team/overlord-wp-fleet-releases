@@ -79,6 +79,17 @@ final class Ovp_Auth {
 		array( '#^backup/plan$#', 0, 0 ),
 		array( '#^backup/(sql|files)$#', 3, 3 ),
 		array( '#^site/clone/(plan|sql|files)$#', 3, 3 ),
+		// 2.1.0: mail (SMTP, templates), Gutenberg helpers, free security tools, agent connect helper.
+		array( '#^agent/connect$#', 0, 0 ),
+		array( '#^mail/smtp/test$#', 2, 2 ), // Sends a message.
+		array( '#^mail/smtp$#', 0, 2 ), // Read never returns the password.
+		array( '#^mail/templates/[a-z0-9][a-z0-9_-]{0,63}/preview$#', 0, 0 ), // Renders only.
+		array( '#^mail/templates/[a-z0-9][a-z0-9_-]{0,63}/send-test$#', 2, 2 ),
+		array( '#^mail/templates(/[a-z0-9][a-z0-9_-]{0,63})?$#', 0, 2 ),
+		array( '#^blocks/(parse|validate|patterns)$#', 0, 0 ),
+		array( '#^blocks/insert$#', 1, 1 ), // Same T1 confirm as apply/gutenberg.
+		array( '#^security/(audit|integrity)$#', 0, 0 ),
+		array( '#^security/(harden|login-limit)$#', 2, 2 ),
 	);
 
 	/** Routes whose request body may reach the 5MB upload cap. */

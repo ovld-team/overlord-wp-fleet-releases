@@ -57,6 +57,9 @@ class Ovp_Bridge {
 			new Ovp_Module_Migrate(),
 			new Ovp_Module_Media_Push(),
 			new Ovp_Module_Maintenance(),
+			new Ovp_Module_Mail(),
+			new Ovp_Module_Blocks(),
+			new Ovp_Module_Security(),
 		);
 
 		add_action( 'rest_api_init', array( $this, 'register_routes' ) );
@@ -76,6 +79,8 @@ class Ovp_Bridge {
 		Ovp_Updater::hooks();
 		Ovp_Self_Update::hooks();
 		Ovp_Migration::hooks();
+		Ovp_Module_Mail::hooks();
+		Ovp_Module_Security::hooks();
 	}
 
 	public function register_routes(): void {

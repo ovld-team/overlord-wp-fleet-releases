@@ -2,10 +2,8 @@
 /**
  * Plugin Name:       Overlord WP Fleet
  * Plugin URI:        https://overlord.team
- * Description:       Signed (Ed25519), tiered remote management for WordPress. Pair this site with an
- *                    Overlord WP Fleet master (or local agent) using a one-time code. Every request is
- *                    cryptographically signed, replay-protected and limited by a tier cap you control.
- * Version:           2.0.10
+ * Description:       Signed, tiered remote management for WordPress: content, media, SEO, plugins, themes, users, options, database, files and backups, plus SMTP and email templates, Gutenberg block tools, a free security audit and hardening, and AI-agent (MCP) connect help. Every request is Ed25519-signed, replay-protected and limited by a tier cap you control.
+ * Version:           2.1.0
  * Update URI:        https://github.com/ovld-team/overlord-wp-fleet-releases
  * Requires at least: 6.0
  * Requires PHP:      8.3
@@ -59,7 +57,7 @@ unset( $ovp_php_id );
  * (autopair, legacy deactivation and credential wipe) is Ovp_Migration.
  */
 
-define( 'OVP_FLEET_VERSION', '2.0.10' );
+define( 'OVP_FLEET_VERSION', '2.1.0' );
 define( 'OVP_FLEET_FILE', __FILE__ );
 
 /*
@@ -124,6 +122,9 @@ require_once OVP_FLEET_DIR . 'includes/modules/class-module-backup.php';
 require_once OVP_FLEET_DIR . 'includes/modules/class-module-migrate.php';
 require_once OVP_FLEET_DIR . 'includes/modules/class-module-media-push.php';
 require_once OVP_FLEET_DIR . 'includes/modules/class-module-maintenance.php';
+require_once OVP_FLEET_DIR . 'includes/modules/class-module-mail.php';
+require_once OVP_FLEET_DIR . 'includes/modules/class-module-blocks.php';
+require_once OVP_FLEET_DIR . 'includes/modules/class-module-security.php';
 require_once OVP_FLEET_DIR . 'includes/class-ovp-media-rename.php';
 require_once OVP_FLEET_DIR . 'includes/class-ovp-migration.php';
 require_once OVP_FLEET_DIR . 'includes/class-ovp-bridge.php';

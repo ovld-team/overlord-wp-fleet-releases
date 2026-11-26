@@ -1,14 +1,14 @@
 === Overlord WP Fleet ===
 Contributors: overlordteam
-Tags: rest-api, automation, ai, agent, management
+Tags: ai, mcp, security, smtp, gutenberg
 Requires at least: 6.0
 Tested up to: 7.0
 Requires PHP: 8.3
-Stable tag: 2.0.10
+Stable tag: 2.1.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Signed, tiered remote management for WordPress. Pair the site with an Overlord WP Fleet master (or a local agent) using a one-time code.
+Signed, tiered remote management for WordPress with free SMTP, email templates, Gutenberg tools and security tools.
 
 == Security model (read before pairing) ==
 
@@ -28,9 +28,53 @@ The plugin keeps a hidden administrator account named `mcp_bridge_service` that 
 
 == Description ==
 
+Overlord WP Fleet lets an AI agent or a fleet panel manage a WordPress site through a signed, tier-limited REST API. Nothing is accepted until you pair the site, and you decide how much the master may do.
+
+**What the master can do (by tier)**
+
+* Content and media: posts, pages, terms, menus, media upload, rename and regenerate; Elementor, Gutenberg and WPBakery page apply; Yoast SEO fields and redirects.
+* Structure: plugins and themes (list, deactivate, delete; install and activate at T3), users, options, search-replace, cron, cache purge, database tools, file read and write, backups, site clone and migration.
+* Operations: updates status, PHP error logs, a fatal-error drop-in, signed self-update of this plugin.
+* Gutenberg tools: parse block markup, validate it against the block types registered on the site, list block patterns, insert blocks into a post.
+* Mail: SMTP settings with an encrypted password that is never shown, a test mail, and an email template manager with preview and test send.
+* AI agent connect: the settings page and a read-only tool show the MCP URL and ready-to-paste snippets for Claude Code, Cursor and other MCP clients. No secret is shown.
+
+**Free security tools (no account, no subscription)**
+
+* Security audit: WordPress and PHP versions, debug flags, XML-RPC, file editor, a user named admin, salts, file permissions, https, outdated plugins.
+* Core file integrity check against the official api.wordpress.org checksums.
+* One-call hardening: disable XML-RPC and the file editor, hide user names from visitors, send security headers.
+* Failed-login lockout per IP address.
+
 Connection modes: local (an agent on your own machine), remote (the master calls your site and your site calls the master), direct, and proxy (your site reaches the master only through a relay you host).
 
 REST namespace: `/wp-json/ovp/v1/`. Every route verifies the signed envelope and the tier.
+
+== Frequently Asked Questions ==
+
+= Does it work without a master? =
+
+The plugin is inert until you pair it: no signed request is accepted and nothing is sent. The free security and mail tools are driven by the master (or a local agent), so pair the site first.
+
+= Is the SMTP password safe? =
+
+It is stored encrypted with a key derived from your wp-config.php salts, in its own option, and no route, log line or error message returns it. If your salts are missing or default the plugin refuses to store it.
+
+= How do I connect Claude Code or Cursor? =
+
+Open Settings > Overlord WP Fleet, section "Connect an AI agent". Create a personal API token in the Fleet panel and paste it in place of YOUR_FLEET_API_TOKEN in the snippet. The agent talks to the master, never to this site directly.
+
+= What can the master change on my site? =
+
+Only what your tier cap allows. T0 reads, T1 edits content after a two-step confirmation, T2 changes structure (plugins, users, options, mail, hardening), T3 has no limit. Lower the cap in wp-admin at any time.
+
+= Does hardening break anything? =
+
+Disabling XML-RPC stops the WordPress mobile app, Jetpack and pingbacks. The X-Frame-Options header stops other sites from framing yours. Every setting can be switched back.
+
+= Does the plugin send data to third parties? =
+
+Three things, all described in the security section above. The core file check contacts api.wordpress.org, only when you run it. After pairing, a signed heartbeat goes to the master or relay you configured. By default (Settings > Overlord WP Fleet can turn it off) the plugin reads the signed release index on GitHub to update itself.
 
 == Installation ==
 
@@ -55,6 +99,9 @@ Deleting the plugin removes only what it created: its own `ovp_*` options, its r
 
 == Upgrade Notice ==
 
+= 2.1.0 =
+2.1.0: new free tools. SMTP and email templates, Gutenberg parse, validate, patterns and insert, a security audit, core file integrity check, one-call hardening and a login lockout, plus an AI-agent connect card in Settings. Nothing changes until the master calls the new routes; all new write routes need T2 (block insert needs T1).
+
 = 2.0.10 =
 2.0.10: the plugin can now update itself even when another plugin switches WordPress's background updater off (only this plugin, only signed newer releases, still switched off by Settings > Overlord WP Fleet). T3 callers can run risky core-table SQL and the other tier-gated operations behind the confirm; deleting or deactivating this plugin through Fleet always takes a backup and never touches content.
 
@@ -68,6 +115,14 @@ Deleting the plugin removes only what it created: its own `ovp_*` options, its r
 A site that was paired by 2.0.6 and has remote raising switched on but no stored ceiling is no longer allowed to be raised back to T3 by the master on its own: its ceiling is now its current cap. To allow T3 again, re-pair the site or set the tier in wp-admin (Settings > Overlord WP Fleet).
 
 == Changelog ==
+
+= 2.1.0 =
+* New: SMTP (`smtp_get`, `smtp_set`, `smtp_test`). Settings in `ovp_mail_smtp`; the password is encrypted in `ovp_mail_smtp_pass` and never returned, logged or echoed. `phpmailer_init` routes mail through the server only when SMTP is enabled with a host.
+* New: email template manager (`email_template_list`, `get`, `set`, `delete`, `preview`, `send_test`). Bodies are sanitised with `wp_kses_post`; placeholders are HTML-escaped; at most 50 templates; `wp_mail` is not hooked.
+* New: AI-agent connect helper: read-only route `agent/connect` and tool `agent_connect_info` (MCP URL and Claude Code, Cursor and generic snippets with a token placeholder) and a card in Settings > Overlord WP Fleet.
+* New: Gutenberg tools `gutenberg_parse`, `gutenberg_validate`, `gutenberg_patterns` (T0) and `gutenberg_insert_block` (T1, through the same adapter and snapshot path as `apply_gutenberg`).
+* New: free security tools `security_audit` and `file_integrity` (T0), `security_harden` (T2, confirm: disable XML-RPC and the file editor, hide author names, security headers) and `login_limit_set` (T2).
+* Changed: plugin header description and readme describe every toolset.
 
 = 2.0.10 =
 * New: own twice-daily update tick (`ovp_self_update_tick`) for this plugin only, independent of `automatic_updater_disabled`; explicit OFF still wins; at most one attempt per 6 hours, paused 24 hours after 3 failures.

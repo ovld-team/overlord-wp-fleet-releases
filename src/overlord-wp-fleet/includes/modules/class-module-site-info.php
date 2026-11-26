@@ -20,6 +20,51 @@ class Ovp_Module_Site_Info extends Ovp_Module_Base {
 		$this->route( 'GET', 'inventory', array( $this, 'get_inventory' ) );
 		$this->route( 'GET', 'site-info', array( $this, 'get_site_info' ) );
 		$this->route( 'GET', 'logs', array( $this, 'get_logs' ) );
+		$this->route( 'GET', 'agent/connect', array( $this, 'get_agent_connect' ) );
+	}
+
+	public function get_agent_connect(): WP_REST_Response {
+		return $this->success( self::agent_connect_info() );
+	}
+
+	/**
+	 * How to point an AI agent at the Fleet master that manages this site. Read-only and secret-free:
+	 * the bearer token is a placeholder (a person creates it in the Fleet panel), the relay URL and
+	 * relay token are never used, and no new auth path exists: the agent talks to the master's /mcp.
+	 *
+	 * @return array<string,mixed>
+	 */
+	public static function agent_connect_info(): array {
+		$cfg   = Ovp_Enroll::config();
+		$base  = $cfg['master_url'];
+		$known = '' !== $base;
+		$url   = ( $known ? $base : '<MASTER_URL>' ) . '/mcp';
+		$name  = 'overlord-wp-fleet';
+		$hdr   = 'Authorization: Bearer YOUR_FLEET_API_TOKEN';
+		$json  = array( 'url' => $url, 'headers' => array( 'Authorization' => 'Bearer YOUR_FLEET_API_TOKEN' ) );
+		$flags = JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES;
+		$notes = array(
+			'Create a personal API token in the Fleet panel and replace YOUR_FLEET_API_TOKEN. This plugin never stores or shows it.',
+			'Tools take a "site" argument: use the site id shown below (or the site name from the Fleet panel).',
+			'What an agent can do on this site is limited by the tier cap you set in Settings > Overlord WP Fleet.',
+		);
+		if ( ! $known ) {
+			$notes[] = 'No master URL is saved on this site (proxy mode keeps only the relay). Replace <MASTER_URL> with the public address of your Fleet master.';
+		}
+		return array(
+			'mcp_url'     => $url,
+			'url_known'   => $known,
+			'transport'   => 'streamable-http',
+			'auth'        => 'Authorization: Bearer <personal API token created in the Fleet panel>',
+			'site'        => Ovp_Keys::is_bound() ? Ovp_Keys::site_id() : '',
+			'paired'      => Ovp_Keys::is_bound(),
+			'snippets'    => array(
+				'claude_code' => 'claude mcp add --transport http ' . $name . ' ' . $url . ' --header "' . $hdr . '"',
+				'cursor'      => (string) wp_json_encode( array( 'mcpServers' => array( $name => $json ) ), $flags ),
+				'generic'     => (string) wp_json_encode( array( 'name' => $name, 'transport' => 'streamable-http', 'url' => $url, 'headers' => $json['headers'] ), $flags ),
+			),
+			'notes'       => $notes,
+		);
 	}
 
 	public function get_info(): WP_REST_Response {
